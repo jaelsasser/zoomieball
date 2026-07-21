@@ -1,11 +1,9 @@
 [package]
-name = "zoomieball-render"
+name = "zoomieball-gpu"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-
-[dependencies]
-zoomieball-core.workspace = true
+description = "Zoomieball-specific GPU simulation and parity integration"
 
 [lints]
 workspace = true

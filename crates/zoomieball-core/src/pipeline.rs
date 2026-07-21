@@ -1,4 +1,4 @@
-//! Normative fixed-order match pipeline and per-tick replay witnesses.
+//! Fixed-order CPU tracer pipeline and layered per-tick replay witnesses.
 
 use crate::controller::{
     ActRequest, ControllerBackend, MotorCommandBatch, RewardBatch, accumulate_team_rewards,
@@ -7,8 +7,11 @@ use crate::hash::{OFFSET_BASIS, fold_u64};
 use crate::perception::{ObservationBatch, SpatialIndex};
 use crate::physics::{PhysicsConfig, step as physics_step};
 use crate::playbook::{OracleIntentBatch, Playbook};
-use crate::world::{RenderSnapshot, World};
-use crate::{LANE_ABI_VERSION, PHYSICS_ABI_VERSION, REPLAY_ABI_VERSION, REWARD_ABI_VERSION};
+use crate::world::World;
+use crate::{
+    COACH_INTERVAL_TICKS, LANE_ABI_VERSION, PHYSICS_ABI_VERSION, REPLAY_ABI_VERSION,
+    REWARD_ABI_VERSION, SCHEDULE_ABI_VERSION,
+};
 
 /// Runtime choices that do not alter hot-loop ordering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,17 +34,17 @@ impl Default for MatchConfig {
     }
 }
 
-/// Authoritative witnesses published after one complete tick.
+/// Layered witnesses published after one complete tick.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TickHash {
-    /// Fixed-point world witness.
-    pub world: u64,
+    /// Normative commutative fixed-point physics-state witness.
+    pub physics: u32,
     /// Controller parameter/transient witness.
     pub controller: u64,
     /// Learning eligibility and rule-state witness.
     pub learning: u64,
-    /// Replay ABI fold over the component witnesses and play node.
-    pub combined: u64,
+    /// Diagnostic whole-pipeline fold, including match metadata and the play node.
+    pub pipeline: u64,
 }
 
 /// Complete deterministic match parameterized by one concrete controller backend.
@@ -51,6 +54,7 @@ pub struct Match<B: ControllerBackend> {
     controller: B,
     playbook: Playbook,
     play_node: usize,
+    pending_play_node: Option<usize>,
     physics: PhysicsConfig,
     learning_interval: u32,
     spatial: SpatialIndex,
@@ -58,12 +62,11 @@ pub struct Match<B: ControllerBackend> {
     intents: OracleIntentBatch,
     commands: MotorCommandBatch,
     rewards: RewardBatch,
-    snapshot: RenderSnapshot,
     last_hash: TickHash,
 }
 
 impl<B: ControllerBackend> Match<B> {
-    /// Allocate all hot-loop buffers and publish the initial snapshot.
+    /// Allocate all hot-loop buffers.
     #[must_use]
     pub fn new(config: MatchConfig, playbook: Playbook, controller: B) -> Self {
         assert!(
@@ -72,13 +75,12 @@ impl<B: ControllerBackend> Match<B> {
         );
         let world = World::new(config.active_per_team);
         let body_count = world.view().len();
-        let mut snapshot = RenderSnapshot::with_capacity(body_count);
-        snapshot.publish(&world);
         Self {
             world,
             controller,
             playbook,
             play_node: 0,
+            pending_play_node: None,
             physics: config.physics,
             learning_interval: config.learning_interval,
             spatial: SpatialIndex::new(body_count),
@@ -86,13 +88,15 @@ impl<B: ControllerBackend> Match<B> {
             intents: OracleIntentBatch::with_len(body_count),
             commands: MotorCommandBatch::with_len(body_count),
             rewards: RewardBatch::with_len(body_count),
-            snapshot,
             last_hash: TickHash::default(),
         }
     }
 
-    /// Advance one complete normative 64 Hz tick.
+    /// Advance one complete 60 Hz body tick through the current CPU tracer.
     pub fn tick(&mut self) -> TickHash {
+        if let Some(node) = self.pending_play_node.take() {
+            self.play_node = node;
+        }
         self.playbook
             .resolve(self.play_node, &mut self.world, &mut self.intents);
         self.spatial.rebuild(self.world.view());
@@ -111,7 +115,7 @@ impl<B: ControllerBackend> Match<B> {
                 } else {
                     (1u8 << self.playbook.nodes()[self.play_node].edges().len()) - 1
                 },
-                coach_due: tick.is_multiple_of(4),
+                coach_due: tick.is_multiple_of(u64::from(COACH_INTERVAL_TICKS)),
             },
             &mut self.commands,
         );
@@ -142,7 +146,6 @@ impl<B: ControllerBackend> Match<B> {
             self.rewards.clear();
         }
         self.last_hash = self.fold_hashes();
-        self.snapshot.publish(&self.world);
         self.last_hash
     }
 
@@ -176,25 +179,20 @@ impl<B: ControllerBackend> Match<B> {
         self.play_node
     }
 
-    /// Select a valid play node directly.
+    /// Queue a valid play node to latch at the start of the next body tick.
     pub fn select_play_node(&mut self, node: usize) {
         assert!(node < self.playbook.nodes().len(), "play node out of range");
-        self.play_node = node;
+        self.pending_play_node = Some(node);
     }
 
-    /// Follow one outgoing port from the current node.
+    /// Queue one outgoing port from the latest queued or active node.
     pub fn traverse_play(&mut self, port: usize) -> bool {
-        let Some(next) = self.playbook.traverse(self.play_node, port) else {
+        let source = self.pending_play_node.unwrap_or(self.play_node);
+        let Some(next) = self.playbook.traverse(source, port) else {
             return false;
         };
-        self.play_node = next;
+        self.pending_play_node = Some(next);
         true
-    }
-
-    /// Current immutable render snapshot.
-    #[must_use]
-    pub const fn snapshot(&self) -> &RenderSnapshot {
-        &self.snapshot
     }
 
     /// Current observations, useful for the first-person inspector.
@@ -210,15 +208,18 @@ impl<B: ControllerBackend> Match<B> {
     }
 
     fn fold_hashes(&self) -> TickHash {
-        let world = self.world.hash();
+        let physics = self.world.physics_hash();
+        let world = self.world.diagnostic_hash();
         let controller = self.controller.controller_hash();
         let learning = self.controller.learning_hash();
-        let combined = [
+        let pipeline = [
             u64::from(REPLAY_ABI_VERSION),
             u64::from(LANE_ABI_VERSION),
             u64::from(PHYSICS_ABI_VERSION),
             u64::from(REWARD_ABI_VERSION),
+            u64::from(SCHEDULE_ABI_VERSION),
             u64::try_from(self.play_node).expect("play node fits u64"),
+            u64::from(physics),
             world,
             controller,
             learning,
@@ -226,10 +227,10 @@ impl<B: ControllerBackend> Match<B> {
         .into_iter()
         .fold(OFFSET_BASIS, fold_u64);
         TickHash {
-            world,
+            physics,
             controller,
             learning,
-            combined,
+            pipeline,
         }
     }
 }
@@ -239,6 +240,7 @@ mod tests {
     use super::*;
     use crate::controller::{CheckpointError, IdleController, MotorCommand};
     use crate::fixed::Vec3Fx;
+    use crate::{BODY_HZ, COACH_HZ, PHYSICS_HZ};
 
     fn playbook() -> Playbook {
         Playbook::compile_ron(include_str!("../../../assets/default-playbook.ron")).unwrap()
@@ -301,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn tracer_spans_intent_perception_actuation_physics_hash_and_snapshot() {
+    fn tracer_spans_intent_perception_actuation_physics_and_hashes() {
         let config = MatchConfig::default();
         let mut a = Match::new(config, playbook(), TracerController::new(10));
         let mut b = Match::new(config, playbook(), TracerController::new(10));
@@ -309,9 +311,8 @@ mod tests {
             let hash_a = a.tick();
             let hash_b = b.tick();
             assert_eq!(hash_a, hash_b);
-            assert_ne!(hash_a.world, 0);
-            assert_eq!(a.snapshot().tick, expected_tick);
-            assert_eq!(a.snapshot().instances.len(), 21);
+            assert_ne!(hash_a.physics, 0);
+            assert_eq!(a.world().tick(), expected_tick);
         }
         assert_eq!(a.controller().acts, 8);
         assert_eq!(a.controller().coaches, 2);
@@ -322,8 +323,20 @@ mod tests {
     fn cyclic_human_traversal_changes_and_returns_to_the_play_node() {
         let mut game = Match::new(MatchConfig::default(), playbook(), IdleController::new(10));
         assert!(game.traverse_play(0));
+        assert_eq!(game.play_node(), 0);
+        game.tick();
         assert_eq!(game.play_node(), 1);
         assert!(game.traverse_play(0));
+        assert_eq!(game.play_node(), 1);
+        game.tick();
         assert_eq!(game.play_node(), 0);
+    }
+
+    #[test]
+    fn fixed_schedule_is_sixty_fifteen_one_twenty() {
+        assert_eq!(BODY_HZ, 60);
+        assert_eq!(COACH_HZ, 15);
+        assert_eq!(COACH_INTERVAL_TICKS, 4);
+        assert_eq!(PHYSICS_HZ, 120);
     }
 }

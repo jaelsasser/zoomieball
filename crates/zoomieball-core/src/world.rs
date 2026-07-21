@@ -1,7 +1,9 @@
-//! Canonically ordered physical world and cosmetic snapshot publication.
+//! Canonically ordered physical world and borrowed simulation views.
 
 use crate::fixed::{Fx, Vec3Fx};
-use crate::hash::{OFFSET_BASIS, fold_i32, fold_u64};
+use crate::hash::{OFFSET_BASIS, fold_i32, fold_u64, physics_body_hash};
+
+const GROUNDED_NORMAL_MIN: Fx = Fx::from_raw(6_554);
 
 /// One of the two opposing teams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -302,7 +304,7 @@ impl World {
 
     /// Canonical authoritative-state witness.
     #[must_use]
-    pub fn hash(&self) -> u64 {
+    pub fn diagnostic_hash(&self) -> u64 {
         let hash = fold_u64(OFFSET_BASIS, self.tick);
         let hash = self
             .scores
@@ -333,6 +335,42 @@ impl World {
             fold_u64(state, flags)
         })
     }
+
+    /// Ten canonical GPU/physics words for one body: position, velocity, spin, flags.
+    #[must_use]
+    pub fn physics_state_words(&self, index: usize) -> [u32; 10] {
+        let vector_words = [
+            self.positions[index],
+            self.velocities[index],
+            self.spins[index],
+        ]
+        .into_iter()
+        .flat_map(|vector| [vector.x.raw(), vector.y.raw(), vector.z.raw()])
+        .map(i32::cast_unsigned);
+        let mut words = [0; 10];
+        for (target, word) in words.iter_mut().zip(vector_words) {
+            *target = word;
+        }
+        let grounded =
+            self.contacts[index].touching && self.contacts[index].normal.z > GROUNDED_NORMAL_MIN;
+        words[9] = u32::from(self.teams[index] == Some(Team::One))
+            | (u32::from(self.roles[index] == Role::Objective) << 1)
+            | (u32::from(grounded) << 2)
+            | (u32::from(self.charges[index].surface) << 3)
+            | (u32::from(self.charges[index].air) << 4);
+        words
+    }
+
+    /// Normative commutative physics-state witness for the current body set.
+    #[must_use]
+    pub fn physics_hash(&self) -> u32 {
+        (0..self.ids.len()).fold(0u32, |hash, index| {
+            hash.wrapping_add(physics_body_hash(
+                self.physics_state_words(index),
+                u32::try_from(index).expect("body index fits u32"),
+            ))
+        })
+    }
 }
 
 fn spawn_position(team: Team, local: LocalId, radius: Fx) -> Vec3Fx {
@@ -357,69 +395,6 @@ fn spawn_position(team: Team, local: LocalId, radius: Fx) -> Vec3Fx {
     Vec3Fx::new(x, own_half, radius)
 }
 
-/// One cosmetic sphere instance in a render snapshot.
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[repr(C)]
-pub struct RenderInstance {
-    /// World position.
-    pub position: [f32; 3],
-    /// Linear velocity for render-only rolling orientation.
-    pub velocity: [f32; 3],
-    /// Radius.
-    pub radius: f32,
-    /// Team code (`0`, `1`, or `2` for neutral).
-    pub team: u32,
-    /// Local number, with `u32::MAX` for the objective.
-    pub local_id: u32,
-    /// Physical role code.
-    pub role: u32,
-}
-
-/// Reusable one-way cosmetic state published after each tick.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct RenderSnapshot {
-    /// Completed authoritative tick represented by this frame.
-    pub tick: u64,
-    /// Packed sphere instances in canonical body order.
-    pub instances: Vec<RenderInstance>,
-}
-
-impl RenderSnapshot {
-    /// Allocate capacity for a world once.
-    #[must_use]
-    pub fn with_capacity(body_count: usize) -> Self {
-        Self {
-            tick: 0,
-            instances: Vec::with_capacity(body_count),
-        }
-    }
-
-    pub(crate) fn publish(&mut self, world: &World) {
-        self.tick = world.tick;
-        self.instances.clear();
-        self.instances
-            .extend((0..world.ids.len()).map(|index| RenderInstance {
-                position: [
-                    world.positions[index].x.to_f32(),
-                    world.positions[index].y.to_f32(),
-                    world.positions[index].z.to_f32(),
-                ],
-                velocity: [
-                    world.velocities[index].x.to_f32(),
-                    world.velocities[index].y.to_f32(),
-                    world.velocities[index].z.to_f32(),
-                ],
-                radius: world.radii[index].to_f32(),
-                team: world.teams[index].map_or(2, |team| team as u32),
-                local_id: match world.ids[index] {
-                    BodyId::Player { local, .. } => u32::from(local.get()),
-                    BodyId::Objective => u32::MAX,
-                },
-                role: world.roles[index] as u32,
-            }));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,6 +415,40 @@ mod tests {
     fn identical_worlds_have_identical_hashes() {
         let a = World::new(10);
         let b = a.clone();
-        assert_eq!(a.hash(), b.hash());
+        assert_eq!(a.physics_hash(), b.physics_hash());
+        assert_eq!(a.diagnostic_hash(), b.diagnostic_hash());
+    }
+
+    #[test]
+    fn physics_hash_accumulation_is_order_independent() {
+        let world = World::new(10);
+        let body_hashes: Vec<_> = (0..world.view().len())
+            .map(|index| {
+                physics_body_hash(
+                    world.physics_state_words(index),
+                    u32::try_from(index).unwrap(),
+                )
+            })
+            .collect();
+        let forward = body_hashes.iter().copied().fold(0u32, u32::wrapping_add);
+        let reverse = body_hashes
+            .iter()
+            .rev()
+            .copied()
+            .fold(0u32, u32::wrapping_add);
+        assert_eq!(forward, reverse);
+        assert_eq!(forward, world.physics_hash());
+    }
+
+    #[test]
+    fn canonical_grounded_flag_excludes_wall_only_contact() {
+        let mut world = World::new(10);
+        world.contacts[0] = ContactFrame {
+            touching: true,
+            normal: Vec3Fx::X,
+        };
+        assert_eq!(world.physics_state_words(0)[9] & (1 << 2), 0);
+        world.contacts[0].normal = Vec3Fx::Z;
+        assert_ne!(world.physics_state_words(0)[9] & (1 << 2), 0);
     }
 }

@@ -1,11 +1,9 @@
 [package]
-name = "zoomieball-render"
+name = "zoomieball-web"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-
-[dependencies]
-zoomieball-core.workspace = true
+description = "WebGPU and Canvas2D application shell for Zoomieball"
 
 [lints]
 workspace = true

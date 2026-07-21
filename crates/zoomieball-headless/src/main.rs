@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use zoomieball_controller::ZoomieBackend;
-use zoomieball_core::{Match, MatchConfig, Playbook, TICK_HZ};
+use zoomieball_core::{BODY_HZ, COACH_HZ, Match, MatchConfig, PHYSICS_HZ, Playbook, TICK_HZ};
 
 fn main() -> ExitCode {
     match run() {
@@ -47,20 +47,23 @@ fn run() -> Result<(), String> {
         let hash = game.tick();
         if hashes {
             println!(
-                "tick={} world={:016x} controller={:016x} learning={:016x} combined={:016x}",
+                "tick={} physics={:08x} controller={:016x} learning={:016x} pipeline={:016x}",
                 tick + 1,
-                hash.world,
+                hash.physics,
                 hash.controller,
                 hash.learning,
-                hash.combined,
+                hash.pipeline,
             );
         }
     }
     if hashes {
         println!(
-            "final ticks={} hash={:016x} score={:?}",
+            "final ticks={} schedule={}/{}/{}Hz pipeline={:016x} score={:?}",
             ticks,
-            game.last_hash().combined,
+            BODY_HZ,
+            COACH_HZ,
+            PHYSICS_HZ,
+            game.last_hash().pipeline,
             game.world().scores(),
         );
         return Ok(());
@@ -68,11 +71,14 @@ fn run() -> Result<(), String> {
     let elapsed = start.elapsed();
     let simulated = f64::from(ticks) / f64::from(TICK_HZ);
     println!(
-        "roster={}v{} ticks={} hash={:016x} score={:?} wall={:.3}s realtime={:.2}x",
+        "roster={}v{} ticks={} schedule={}/{}/{}Hz pipeline={:016x} score={:?} wall={:.3}s realtime={:.2}x",
         active_per_team,
         active_per_team,
         ticks,
-        game.last_hash().combined,
+        BODY_HZ,
+        COACH_HZ,
+        PHYSICS_HZ,
+        game.last_hash().pipeline,
         game.world().scores(),
         elapsed.as_secs_f64(),
         simulated / elapsed.as_secs_f64(),

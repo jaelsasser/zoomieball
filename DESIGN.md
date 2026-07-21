@@ -1,45 +1,86 @@
 # Zoomieball — design
 
-Status: v0.1, 2026-07-19. Records decisions acked to date; items not yet decided are
-listed under [Open items](#open-items) and marked `provisional` where a working value
-exists. `TICK.md` is the normative simulation spec; where the two disagree, TICK.md wins
-for simulation behaviour and this document wins for intent.
+Status: v0, 2026-07-20. This document records the architecture and decisions
+acknowledged to date. Undecided surfaces remain under [Open items](#open-items);
+working values are marked `provisional`. [GAME_TICK.md](GAME_TICK.md) is normative
+for runtime ordering and deterministic simulation behavior. This document is
+normative for design intent.
 
-## Overview
+## Problem
+
+Zoomieball combines three systems that are easy to make independently and hard to
+keep coherent together: a deterministic fixed-point sport, recurrent learned
+controllers, and a GPU-resident renderer. A GPU-only implementation lacks a portable
+oracle and excludes machines without usable WebGPU. A CPU-only implementation cannot
+meet the 100v100 target. A playbook-only controller omits the Zoomie Net control path
+that turns formation intent into embodied behavior.
+
+The repository therefore retains the existing CPU simulation, perception,
+controller, playbook, renderer seam, and headless runner as production architecture.
+The CPU path is the conformance oracle, the permanent 10v10 compatibility tier, and
+the lockstep shadow used to bring up the WebGPU path. GPU authority replaces the
+shadow only after physics, controller inference, and learning witnesses agree.
+
+The current implementation is an alignment/M0 tracer. It exercises the CPU path from
+play selection through perception, controller output, physics, rewards, witnesses,
+and presentation, but it does not yet conform to every arithmetic, arena, collision,
+playbook, or GPU requirement below. Unimplemented ownership is tracked by the root
+roadmap and one `TODO.md` in each workspace package. No current GPU feature is implied
+by this document merely because it is part of the final architecture.
+
+## System shape
 
 Zoomieball is a Rocket-League-shaped team sport played by billiard balls. The player
 authors a playbook; two teams of 10 or 100 uniform spheres (stretch: 1000 per side)
-execute it, moving only through spin and cue-strike impulses, trying to put a single
-neutral game ball into the opposing goal. The simulation is deterministic fixed-point
-integer arithmetic resident on the GPU; the renderer is a stark hard-light poster:
-white void arena, flat unioned shadows, two jersey-striped teams, one black ball.
+execute it, moving only through spin and cue-strike impulses, trying to put one
+neutral game ball into the opposing goal.
 
-Tone anchor, acked verbatim:
+The controller and simulation share one fixed schedule on every execution tier:
+
+```text
+60 Hz match/play input
+          │
+          ▼
+graph-v0 assignment + oracle intent ───────────────────────────────┐
+          │                                                        │ refresh
+          ▼                                                        │ at 120 Hz
+180° perception ──► 15 Hz coaches ──► squad mailboxes/edge logits │
+          │                    │                                   │
+          └────────────────────┴──► 60 Hz fielders + goalies       │
+                                      │ residuals + cue gates       │
+                                      ▼                             ▼
+                               motor decode ◄────────────── oracle steering
+                                      │
+                                      ▼
+                           2 × 120 Hz physics substeps
+                                      │
+                         rewards / learning / witnesses
+                                      │
+                         ┌────────────┴─────────────┐
+                         ▼                          ▼
+              packed CPU snapshot          GPU-resident buffers
+                         │                          │
+                 Canvas2D/raw render          raw WebGPU render
+```
+
+Perception and embodied networks pulse at 60 Hz. Coaches pulse every fourth body
+tick, at 15 Hz, and publish mailboxes early enough for the same tick's body networks
+to consume them. Oracle steering, motor combination, and physics run at 120 Hz. A
+device may not select a different controller rate. The exact order is specified in
+[GAME_TICK.md](GAME_TICK.md#tick-order).
+
+## Vision
+
+Tone anchor, acknowledged verbatim:
 
 > Zoomieball is a broadcast from a white infinity cove — an arena made of light instead
 > of lines, where two teams of small glossy jersey-striped spheres spell out their
 > physics in visible spin and cast shadow beneath floating Helvetica, and the only true
 > blacks on the field are the goal mouths and the one ball that belongs in them.
 
-("Glossy" predates the flat-two-tone finish decision; the sentence otherwise stands.)
+“Glossy” predates the flat-two-tone finish decision; the sentence otherwise stands.
 
-```
-CPU (wasm, single-thread)                GPU (WebGPU)
-─────────────────────────                ─────────────────────────────
-play selection, HUD, camera ─ mailbox ─▶ playbook eval ─▶ 2× physics substeps
-        ▲                     (≤2 KB/tick)                     │
-        │                                                      ▼
-  DOM overlay (score, clock,             state buffers (SoA, ping-pong)
-  play bar, number labels)                    │                │
-        ▲                                     ▼                ▼
-        └──── async map (~102–103 B) ── event ring        render pass
-              2–3 frame latency         + pick pass       (vertex pull,
-                                                           no readback)
-```
-
-## Vision
-
-What the ball sees and feels (acked verbatim):
+What the ball sees and feels, acknowledged verbatim:
 
 > You are a hand's-width of lacquer on a plain that outruns your horizon. The floor is
 > the one certainty — white, endless, faintly warm — and your entire vocabulary is
@@ -54,7 +95,7 @@ What the ball sees and feels (acked verbatim):
 > from the air, until the floor (or a wall that has become a floor) takes your hand
 > again.
 
-What the person sees (acked verbatim):
+What the person sees, acknowledged verbatim:
 
 > A high orthographic vantage with a slight, fixed shear — enough to stand the goal
 > mouths up as dark slits and give the cove its lean, never enough to cost the
@@ -66,64 +107,148 @@ What the person sees (acked verbatim):
 > owners, spin as bands swimming across beads of color. Numbers exist only when
 > summoned, projected above the field in team ink.
 
-(The person-view text predates the hard-light revision: "tangent shadows and corner
-pooling" is now produced by cast-shadow creases and contour loops rather than gradient
-bands. The reading distances and scale ratios stand.)
+The person-view text predates the hard-light revision: cast-shadow creases and
+contour loops replace gradient bands. The reading distances and scale ratios stand.
 
-## Game
+## Game and movement
 
-- Teams of 10 or 100 per side; 1000 per side is a stretch goal. All balls share one
-  radius and mass; a single neutral game ball scores.
-- Control is a playbook: RON files at rest, compiled at load into flat GPU tables
-  (per-ball `{verb_id, target_kind, target_idx, params[4]}` plus a phase-transition
-  table). Verb set is provisional: seek, intercept, screen, shoot-at, clear; the set
-  stays under a dozen. Plays are phases with roles assigned by ball index and
-  triggers (zone entry, possession change, time). An in-game editor writes the same
-  RON schema later; hardcoded RON fixtures drive development.
-- Control is layered by data locality: per-ball steering runs on the GPU every tick
-  (it reads ball positions); coarse play selection runs on the CPU off the delayed
-  event stream, where ~50 ms of staleness is acceptable.
-- Movement verbs per ball: continuous commanded spin (a slewed target angular
-  velocity), plus cue-strike impulses parameterized as a billiards hit — impulse
-  direction **d**, surface hit normal **n**, magnitude J, giving Δv = J·**d** and
-  Δω = (5/2)·J·(**n**×**d**) at r = m = 1. Jump is the surface-normal preset; the
-  air move is a second configured cue hit. One ground jump plus one air move, both
-  restored on any surface contact. Magnus force k(ω×v) provides air steering.
+- Teams contain 10 or 100 active bodies per side; 1000 per side is a stretch goal.
+  All balls share one radius and mass. One neutral game ball scores.
+- Movement consists of a continuous commanded spin target plus cue-strike impulses.
+  A cue hit has impulse direction **d**, surface hit normal **n**, and magnitude J,
+  giving Δv = J·**d** and Δω = (5/2)·J·(**n**×**d**) at r = m = 1.
+- Jump is the surface-normal cue preset. An airborne body has one configured air cue.
+  One surface charge and one air charge are restored on any arena contact. Magnus
+  force k(ω×v) provides airborne steering.
 - Goals are dugouts: recessed boxes subtracted from the arena SDF behind each end
-  wall. The scoring predicate (game-ball center crosses the mouth plane vs. fully
-  past) is open and will be a RON match rule.
-- Ball numbers are not on the balls. They exist as HUD-space projections above each
-  ball — screen-constant size, team-colored numeral on a hairline stem — shown on
-  hover (single ball), alt-hold (all), or a persistent setting. Label placement uses
-  one declutter rule: flip below the ball on intersection.
+  wall. The scoring predicate—game-ball center crossing the mouth plane or the whole
+  ball passing it—remains open and belongs to the RON match rules.
+- Ball numbers are HUD-space projections, never paint on a ball. Hover shows one;
+  alt-hold or a persistent setting shows all. A label flips below its ball when the
+  normal position intersects another label.
+
+## Zoomie Net control
+
+The playbook supplies a deterministic oracle and Zoomie supplies bounded learned
+residuals. Neither can silently replace the other. This split keeps a match legible
+as authored tactics while allowing local adjustment learned from perception and
+reward.
+
+### Populations and perception
+
+The deterministic perception builder covers the full 180° field and emits
+target-directed CSR observations in canonical body order. Its spatial-grid
+implementation and brute-force oracle must remain equivalent; occlusion,
+distant-target inclusion, fovea behavior, and lane layout are conformance surfaces.
+The same observation contract feeds three network families:
+
+| Population | Physical members | Pulse rate | Responsibility |
+|---|---:|---:|---|
+| fielder | team bodies with fielder roles | 60 Hz | local steering residuals and cue gates |
+| goalie | team bodies with goalie roles | 60 Hz | goal-oriented steering residuals and cue gates |
+| coach | nonphysical team coaches | 15 Hz | squad mailboxes and graph edge logits |
+
+Coaches run before embodied populations on due ticks. Their squad mailboxes are
+published and consumed in that same body tick; an implicit one-tick delay is a
+conformance failure. Edge logits participate only through graph-v0's defined coach
+edge semantics.
+
+### Playbook and motor combination
+
+There is one cyclic graph-v0 schema, not a prototype and production pair. Each node
+will be extended in place to hold triggers, per-ball verb/target tables, squad
+assignments, oracle intent, and coach edge semantics. RON is the at-rest form and
+flat tables are the execution form. Fixture plays use the same schema that the later
+editor writes. No migration reader is required for Zoomieball-local v0 artifacts.
+
+At the start of a body tick, graph-v0 resolves assignments and initial oracle intent.
+Body networks receive that intent with perception and the current squad mailbox.
+Their outputs latch one learned steering residual and cue gates for the body tick.
+Before each 120 Hz physics substep, the oracle refreshes steering from current state;
+the motor decoder combines that fresh oracle value with the latched learned output.
+The learned term is therefore not recomputed at physics frequency, and the oracle is
+not held stale for both substeps.
+
+Trigger vocabulary and per-verb parameter shapes are still open. Checked-in plays
+beyond fixtures remain blocked until those shapes are acknowledged.
+
+### Rewards, learning, checkpoints, and inspection
+
+Physics progress and match events accumulate typed rewards after each substep.
+Learning runs only at its declared deterministic schedule, after reward accumulation;
+its state has a witness separate from inference state. Checkpoints contain the
+fielder, goalie, and coach populations plus schedule and learning state needed for an
+exact continuation. The current `CheckpointHeader` carries `schedule_abi = 1` so a
+checkpoint cannot silently cross the 60/15/120 schedule boundary. Zoomieball-local
+checkpoint headers change in place during v0. The established sibling Zoomie wire
+formats remain authoritative and are not revised by this repository.
+
+Inspection is part of the controller boundary rather than a render dependency. The
+headless runner exposes replay witnesses and first divergence; the perception
+inspector exposes the exact CSR observations; controller inspection exposes outputs,
+mailboxes, edge logits, population checksums, learning checksums, and checkpoint
+round-trips.
+
+## Execution tiers
+
+| Tier | Authority | Presentation | Scale and purpose |
+|---|---|---|---|
+| CPU compatibility | scalar CPU simulation, perception, Zoomie inference, and learning | one packed cosmetic snapshot per body tick; Canvas2D or raw renderer | permanent 10v10 fallback, headless execution, conformance oracle, replay debugging |
+| GPU bring-up | CPU shadow supplies commands while GPU physics advances in lockstep | GPU-resident renderer; diagnostic hash readback | stage-by-stage WGSL physics parity and first-divergence bisection |
+| GPU primary | GPU physics plus GPU Zoomie schedules and Zoomieball-specific control | resident state buffers, with no authoritative-state upload or readback | shipping WebGPU path and 100v100 target |
+
+The GPU Zoomie schedule belongs in a generic sibling `zoomie-gpu` crate. It implements
+Zoomie families, gates, stepping, learning, outputs, and checksums, and remains
+bit-identical to sibling Zoomie's serial/population oracle. `zoomieball-gpu` retains
+game-specific perception, topology selection, rewards, squad mailboxes, graph
+integration, and motor decoding. This boundary preserves Zoomie's established wire
+formats while avoiding a game-specific fork of its arithmetic.
+
+The primary WebGPU path loses the CPU shadow only after physics, controller, and
+learning parity all pass. It then evaluates game state in resident buffers and gives
+those buffers directly to the renderer. Small event and witness readbacks remain
+diagnostic or application-facing; authoritative state is neither uploaded for
+rendering nor read back for control.
+
+## Workspace components
+
+The workspace contains seven green Zoomieball packages. Dependency-heavy integrations
+remain unpinned until their milestone starts.
+
+| Package | Responsibility |
+|---|---|
+| `zoomieball-core` | CPU scalar simulation, fixed math, play graph, perception oracle, typed controller batches, rewards, replay witnesses |
+| `zoomieball-controller` | CPU Zoomie populations, input/output encoding, learning, squad mailboxes, checkpoints |
+| `zoomieball-gpu` | Zoomieball-specific GPU physics, perception, generic GPU-controller integration, and CPU/GPU parity harness |
+| `zoomieball-render` | controller-independent raw renderer with CPU-snapshot and GPU-resident input paths |
+| `bevy-zoomieball` | published Bevy wrapper and example application |
+| `zoomieball-web` | WebGPU application, Canvas2D compatibility presenter, and DOM HUD |
+| `zoomieball-headless` | native/WASI CPU runner, replay debugger, benchmark, and later CPU/GPU parity driver |
+
+`zoomieball-core` does not own cosmetic `f32` snapshots. The render layer owns their
+packing and publication. A CPU frame performs one packed snapshot publication. A GPU
+frame consumes resident simulation buffers without an authoritative-state upload or
+readback. Render-only orientation quaternions remain `f32`, non-authoritative, and
+excluded from replay witnesses.
 
 ## Visual language
 
-- One hard directional light. It drives three things that therefore always agree:
-  cast-shadow azimuth, the shading terminator on every ball, and the specular dot
-  position.
-- Shadows are flat, hard-edged, single-tone ellipses, drawn as a union (one color, so
-  overlap is invisible). Under parallel light a sphere's shadow neither shrinks nor
-  fades with altitude — height reads purely as lateral offset h·cot(elevation) along
-  the light azimuth. Where a shadow crosses the floor–wall tangent it creases: folds,
-  compresses, changes heading. The walls are never drawn; they are the thing that
-  bends shadows, so the arena's shape is traced by play itself.
-- The arena is a white void: a rounded-box SDF with a large edge fillet (the cove),
-  walls visually endless, ink present only as center line, center circle, two black
-  goal apertures, and up to two contour loops. The loops — the tangent loop (where
-  flat floor ends) and a waterline loop drawn on the cove at constant height — imply
-  the bowl through their varying gap (wide at the far wall, near-touching at the near
-  wall, flared at corners). Loop rendering is a 4-way runtime toggle:
-  `none | tangent | waterline | both`. The center line terminates in cove hooks: a
-  foreshortened riser at the far end, a J-hook at the near end.
-- Ball finish is flat two-tone: body-lit, body-shade, band-lit, band-shade — four
-  solid fills split by a hard terminator fixed to the global light. The band snaps to
-  its shade tone where it crosses the terminator. Both teams are jersey-striped
-  (home: red body, paper band; away: paper body, blue band); the game ball is the
-  only solid: ink with one white surface dot (spin telltale) plus the specular. Spin
-  legibility comes from band swim, terminator crossing, and (game ball) the dot.
-- Palette is a token table; inversion (dark mode) is a table swap, no ramps. Working
-  values, provisional:
+- One hard directional light drives cast-shadow azimuth, each ball's shading
+  terminator, and its specular-dot position.
+- Shadows are flat, hard-edged, single-tone ellipses drawn as a union. Under parallel
+  light a sphere's shadow neither shrinks nor fades with altitude; height appears as
+  lateral offset h·cot(elevation). A shadow folds, compresses, and changes heading
+  where it crosses the floor-wall tangent. The walls are not drawn.
+- The arena is a white rounded-box SDF with a large cove fillet. Ink appears only as
+  the center line, center circle, two black goal apertures, and up to two contour
+  loops. Tangent and waterline loops have a four-way runtime toggle:
+  `none | tangent | waterline | both`. The center line ends in cove hooks.
+- Ball finish is flat two-tone: body-lit, body-shade, band-lit, and band-shade. Both
+  teams are jersey-striped: home uses red body and paper band; away uses paper body
+  and blue band. The game ball alone is solid ink, with one white spin telltale and
+  the specular dot.
+- The palette is a token table. Dark-mode inversion swaps tables and introduces no
+  ramps. Working values remain provisional:
 
   | Token | Value | Token | Value |
   |---|---|---|---|
@@ -135,138 +260,126 @@ bands. The reading distances and scale ratios stand.)
   | away.band.lit | `#1E3A66` | away.band.shade | `#132242` |
   | game.lit | `#1E1E1D` | game.shade | `#050505` |
 
-- Type is Helvetica-class throughout, lowercase-leaning HUD. Helvetica itself
-  requires an embedding license; Inter, Neue Haas Grotesk, or Arimo are the
-  candidates for shipping. HUD (score, clock, play bar, number labels on the compat
-  tier's DOM path) is real HTML text, not glyph atlases, wherever a DOM overlay
-  exists.
+- Type is Helvetica-class throughout, with a lowercase-leaning HUD. Helvetica needs
+  an embedding license; Inter, Neue Haas Grotesk, and Arimo remain shipping
+  candidates. HUD text uses HTML wherever a DOM overlay exists.
 
 ## Camera and projection
 
-World → screen is affine: `sx = x − 0.12·y`, `sy = 0.62·y − 0.785·z` (constants
-provisional; the 0.62/0.785 pair is near-orthonormal so spheres project to circles
-within ~2%). The shear stands the goal apertures up as slits and gives shadows a
-consistent stage. The WebGPU tier adds a free 3D camera; the compat tier fixes this
-oblique view. Sphere-to-circle invariance under the affine camera is load-bearing:
-ball appearance is f(team, orientation) only, independent of screen position, which is
-what makes sprite caching valid.
+The compatibility camera uses the provisional affine projection
+`sx = x − 0.12·y`, `sy = 0.62·y − 0.785·z`. The near-orthonormal 0.62/0.785 pair
+keeps projected spheres circular within about 2%. The shear stands goal apertures up
+as slits and gives shadows a consistent stage. WebGPU adds a free 3D camera; Canvas2D
+keeps this fixed oblique view. Sphere-to-circle invariance makes cached appearance a
+function of team and orientation rather than screen position.
 
-## Components
+## Why it is shaped this way
 
-| Crate | Responsibility | Depends on |
-|---|---|---|
-| `zoomie_core` | Fixed-point math, deterministic scalar sim (reference impl), arena SDF, play compiler (RON → tables), replay format, state hash. `no_std`-friendly. | — |
-| `zoomie_gpu` | WGSL kernels + pipeline/bind-group setup against raw wgpu; constants generated from `zoomie_core` via `build.rs`. | wgpu (version-matched to Bevy's) |
-| `bevy_zoomie` | Published Bevy plugin: render-graph nodes wrapping `zoomie_gpu`; in-repo test app. Publishes in lockstep with Bevy releases. | bevy, `zoomie_gpu` |
-| `zoomie_web` | wasm app: WebGPU canvas + DOM HUD, tier detection, Canvas2D compat presenter driven by the `zoomie_core` scalar sim. No Bevy. | `zoomie_core`, `zoomie_gpu` |
+- **Fixed-point integers make conformance algebraic.** Q16.16 with exact widened
+  intermediates avoids floating-point reassociation and contraction differences.
+  Native, WASM, and WGSL replays can agree by value rather than compiler discipline.
+- **The CPU implementation is permanent infrastructure.** It is the scalar oracle,
+  headless implementation, fallback tier, and source of golden replays. Retaining it
+  makes GPU bring-up observable and gives 10v10 users a complete game without WebGPU.
+- **The oracle/residual split preserves authored intent.** Graph-v0 and refreshed
+  oracle steering express the play; the learned term reacts locally. Latching only
+  the learned output gives bodies 60 Hz perception without making 120 Hz physics use
+  stale geometric steering.
+- **Jacobi plus integer atomics makes pair scatter deterministic.** Wrapping addition
+  is commutative. Atomically built cell lists still have nondeterministic order, so
+  broadphase output is consumed as a set and cells are never capacity-capped. A later
+  grid uses counting sort and prefix scan.
+- **Layered witnesses localize divergence.** A commutative physics hash answers
+  whether canonical body state differs; controller and learning checksums identify
+  network divergence; a whole-pipeline fold aids diagnostics without pretending all
+  layers have the same conformance semantics.
+- **GPU residency avoids the expensive boundary.** Work that consumes current body
+  state remains on the GPU in the primary tier. The raw renderer accepts those
+  buffers directly, while the CPU tier pays for exactly one cosmetic publication.
+- **The arena SDF is shared physics and lighting geometry.** Collision, cove contact,
+  goal volumes, and shadow creases derive from one shape and cannot drift apart.
+- **Hard flat shadows preserve the poster grammar at low cost.** Unioned single-tone
+  ellipses work on both render tiers. Parallel-light offset encodes altitude without
+  a small-versus-high ambiguity.
+- **Small balls leave most pixels static.** At roughly 1/40 arena width per ball,
+  dirty-rectangle Canvas2D painting and DPR-bucket sprite caching are viable. Below
+  roughly 10 px radius, vector arcs may beat sprite blits and must be measured.
 
-Tier selection at startup: no WebGPU adapter, or a software adapter reported via
-`adapter.info` → CPU sim + Canvas2D, fixed camera, 10v10.
+Known numeric limits remain: WGSL has no i64 or integer `mulhi`, so wide products use
+16-bit limbs. The compatibility tier omits the free camera and large team sizes.
+Render-side orientation may drift visually between clients because it is deliberately
+non-authoritative.
 
-## Why it's shaped this way
+## Runtime flow
 
-- **Integer fixed-point because float is not portable.** Any legal compiler transform
-  of integer arithmetic is value-preserving mod 2³²; float reassociation and FMA
-  contraction are not. Q16.16 with emulated 64-bit intermediates gives bit-identical
-  results across driver compilers and vendors, and makes replays, lockstep netplay,
-  and cross-tier parity properties of the algebra rather than disciplines.
-- **Jacobi + integer atomics because addition commutes.** Order-independent
-  accumulation makes GPU scatter deterministic regardless of scheduling. The known
-  trap: atomically built cell lists have deterministic contents but nondeterministic
-  order, so broadphase output must be consumed as a set (sums), and capped-capacity
-  cells are forbidden (which ball overflows is schedule-dependent). Grid, when added,
-  is counting-sort + prefix scan.
-- **GPU-resident with layered control because readback is the scarce resource.**
-  Uploads (mailbox) are cheap; readbacks carry `mapAsync` latency and sync points.
-  Everything that must read per-tick ball state (steering, hover picking) runs on the
-  GPU; only bytes-per-tick events and an 8-byte debug hash come back, 2–3 frames
-  late.
-- **Two tiers, one core, because the reference sim must exist anyway.** The scalar
-  Rust sim is the determinism oracle for the WGSL port; giving it a Canvas2D
-  presenter converts a test asset into a compatibility tier for blocklisted
-  Chromebooks at near-zero marginal cost. Physics lives twice (Rust, WGSL) and is
-  held together by TICK.md, shared per-kernel test vectors, and per-tick hash parity
-  in CI.
-- **The arena SDF is shared physics and lighting geometry.** Collision, cove
-  shading-by-shadow-crease (fixed-step march along the light direction), and goal
-  volumes are one expression; they cannot desync.
-- **Hard flat shadows because they are cheaper and clearer than gradients.** Unioned
-  single-tone ellipses beat gradient fills on every tier; parallel-light offset
-  encoding removes the small-vs-high ambiguity of soft blobs; the compat tier
-  approximates a crease as two overlapping same-tone ellipses.
-- **Small balls, large arena.** At ~1/40 arena width per ball, most pixels belong to
-  the static layer: dirty-rect repainting pays again on the compat tier, the sprite
-  atlas is baked per-DPR bucket, and below ~10 px radius direct vector arcs rival
-  sprite blits (measure, don't assume). Crispness on retina comes from rendering at
-  `devicePixelRatio` (capped ~1.25–2 by tier).
+One 60 Hz body tick latches match and play input, resolves graph-v0, builds perception,
+optionally runs coaches, runs body networks, and latches learned outputs. Each of its
+two 120 Hz substeps refreshes oracle steering, combines it with the latched output,
+and executes the fixed physics stages. Afterward the runtime accumulates rewards,
+runs due learning, publishes all witness layers, and exposes presentation state.
+[GAME_TICK.md](GAME_TICK.md#tick-order) defines the complete ordering.
 
-Known limits: WGSL has no i64 and no mulhi (products go through 16-bit limbs);
-division is avoided in favour of Newton reciprocal/rsqrt; the compat tier gives up
-the free camera and large team sizes; orientation quaternions are render-side f32 and
-non-authoritative, so visual roll may drift between clients by design.
+The witness layers are:
 
-## Flow
-
-One 60 Hz tick: CPU writes the mailbox (play selection, camera-independent commands,
-≤2 KB) → GPU latches inputs → playbook eval emits per-ball spin targets and impulse
-requests → two 120 Hz physics substeps run the TICK.md stage order (impulses, motor,
-gravity, Magnus, integrate, arena contact with traction, Jacobi pair solve, caps) →
-events (goals, game-ball touches, pick results) append to a ring the CPU maps
-asynchronously and sorts by (tick, ball_id) → the render pass vertex-pulls the two
-most recent state snapshots and interpolates; a small f32 compute pass advances
-render-only orientation from deterministic spin. The DOM overlay draws score, clock,
-play bar, and number labels.
+| Witness | Semantics |
+|---|---|
+| `TickHash.physics: u32` | normative `World::physics_hash()` over the ten canonical GPU/physics words per body |
+| `TickHash.controller: u64` | Zoomie inference, parameter, and transient-state checksum |
+| `TickHash.learning: u64` | Zoomie eligibility and learning-rule checksum |
+| `TickHash.pipeline: u64` | diagnostic fold including `World::diagnostic_hash()`, ABI/version inputs, play state, and the three preceding witnesses |
 
 ## Milestones
 
-- M0 `zoomie_core`: fixed-point module (`qmul`, `isqrt`, `rsqrt`), vec ops, arena
-  SDF, scalar sim per TICK.md, replay format, headless tests.
-- M1 Canvas2D presenter, early — it is the dev visualization and the feel-tuning
-  rig; feel risk retires here.
-- M2 GPU sim: WGSL ports, tiled n² collisions, parity harness green on golden
-  replays.
-- M3 impostor renderer + free camera as the Bevy plugin with the in-repo test app.
-- M4 playbook: RON schema, compiler, GPU eval pass, two or three fixture plays.
-- M5 `zoomie_web` shell: tier detection, match flow, DOM HUD.
-- Post-M5: prefix-sum grid broadphase; 1000-per-side scaling; editor.
+| Milestone | Completion state and boundary |
+|---|---|
+| Alignment | Seven green packages, ownership TODOs, reconciled docs, 60/15/120 clocks, render-owned cosmetic snapshots, and honest tracer labels |
+| M0 — conforming CPU | Public tracer from graph selection through presentation; exact arithmetic and constants; canonical words; arena, motor, contacts, Jacobi pairs, caps, events; extended graph-v0; native/WASM/WASI golden witnesses |
+| M1 — CPU compatibility | Fixed-camera Canvas2D over CPU snapshots; complete 10v10 physics, perception, Zoomie inference/learning, HUD, labels, feel tuning, and realtime benchmark |
+| M2a — GPU physics shadow | WGSL fixed helpers and physics stages; CPU-produced commands; per-step physics parity; first-divergence and stage bisection |
+| M2b — GPU Zoomie | Generic sibling GPU schedules bit-identical to Zoomie's serial oracle; Zoomieball integration; controller and learning parity; shadow removal only after all witnesses pass |
+| M3 — rendering | Raw renderer, GPU-resident source, hard-light arena, Bevy wrapper, free camera, contours, and perception inspector |
+| M4 — playbook | GPU graph-v0 evaluation and checked-in plays after trigger and verb shapes are acknowledged |
+| M5 — application | WebGPU shell, tier selection, DOM HUD, Canvas2D fallback, import/export, and device profiling |
 
-## Decision ledger
+The CPU target is realtime 10v10 including Canvas2D, perception, inference, and
+learning. The WebGPU target remains 100v100. Formatting, workspace tests, Clippy with
+warnings denied, native builds, and WASM checks gate each completed bite.
 
-Acked as of 2026-07-19:
+## Settled constraints
 
-1. Rust/Bevy + wgpu → WebGPU; GPU-resident deterministic Q16.16 sim, no f32 in sim.
-2. Jacobi collision solve with integer atomics; fixed dispatch and iteration counts.
-3. Mailbox in, event ring out; readback async, small, sorted (tick, ball_id).
-4. WebGPU primary tier + Canvas2D compat tier, both in v1, sharing `zoomie_core`.
-5. TICK.md normative; per-kernel shared test vectors; commutative per-tick state hash.
-6. Crate split `zoomie_core` / `zoomie_gpu` / `bevy_zoomie` (published) / `zoomie_web`.
-7. Full aerial play: cove arena (large-fillet rounded-box SDF), Magnus + one air cue
-   impulse, charges reset on contact; invisible sim ceiling.
-8. Dugout goals via SDF box subtraction; black slit apertures.
-9. Both teams jersey-striped (red/paper vs paper/blue); game ball solid ink with one
-   white dot; numbers as HUD projections only (hover / alt-hold / setting).
-10. Playbook: RON files first, compiled to flat tables; in-game editor later.
-11. Oblique ortho camera with slight fixed shear; free camera on WebGPU tier only.
-12. Hard single directional light; flat unioned single-tone shadows; height as
-    lateral offset; shadow creases reveal the cove.
-13. Contour loops (tangent + waterline) as a 4-way runtime toggle.
-14. Flat two-tone ball finish, four tones, band snaps at the terminator.
-15. Arena drawn by negative space: no boundary outline, no gradients in the arena;
-    ink only for markings, apertures, loops.
+1. CPU and GPU implementations use deterministic Q16.16 state and one fixed update
+   schedule: 60 Hz perception/body, 15 Hz coaches, and 120 Hz oracle/motor/physics.
+2. The scalar CPU implementation remains a supported conformance, headless, and
+   compatibility path. WebGPU is the primary large-match path.
+3. Playbook oracle steering and learned Zoomie residuals both participate in control.
+   Fielders, goalies, and coaches are distinct populations.
+4. Coaches publish same-tick squad mailboxes and graph edge logits before body
+   evaluation.
+5. One graph-v0 schema is extended in place. Zoomieball-local v0 formats and fixtures
+   have no migration requirement; sibling Zoomie's established formats do.
+6. Physics uses fixed stage order and Jacobi pair solving with integer commutative
+   accumulation.
+7. The renderer is controller-independent. CPU presentation consumes one cosmetic
+   packed snapshot; GPU presentation consumes resident buffers.
+8. Conformance uses separate physics, controller, and learning witnesses plus a
+   diagnostic pipeline fold.
+9. The cove arena, dugout goals, aerial cue, Magnus force, hard light, flat shadows,
+   contour toggles, striped teams, solid ink game ball, and HUD-only numbers remain
+   the visual and physical direction.
+10. RON playbooks compile to flat execution tables; a later editor writes the same
+    schema.
 
 ## Open items
 
-- Scoring predicate (center-cross vs fully-past), as a RON match rule.
-- Arena dimensions as a function of team size (10v10 values are provisional; number
-  legibility is expected to yield to solid-vs-band team reading at 100v100).
-- Default loop mode out of the 4-way toggle.
-- Physics constants: rig values are feel-provisional pending M1 tuning (see TICK.md
-  tables).
-- Palette finalization (tokens above are working values) and shipped typeface choice.
-- Bevy/wgpu version-pinning policy for the published plugin.
-- Software-adapter / no-WebGPU user messaging.
-- RON schema details: verb parameter shapes, trigger vocabulary, formation
-  definitions.
-- Dugout interior dimensions and ceiling height.
-- Whether rust-gpu → naga single-source of the sim is viable (spike; off the critical
-  path — hand-port + parity harness is the plan of record).
+- Scoring predicate: center crossing versus the whole game ball passing, expressed as
+  a RON match rule.
+- Arena dimensions by team size, dugout interior dimensions, and ceiling height.
+- Default contour-loop mode.
+- Final physics constants after M1 feel tuning.
+- Final palette tokens and shipped typeface.
+- Bevy/wgpu version pins and publication policy; scaffolding chooses neither.
+- Software-adapter and no-WebGPU user messaging.
+- Graph-v0 trigger vocabulary, per-ball verb parameter shapes, formation definitions,
+  and the exact set of checked-in plays.
+- Whether a rust-gpu-to-naga single-source spike is viable. Hand port plus parity
+  remains the critical-path plan.

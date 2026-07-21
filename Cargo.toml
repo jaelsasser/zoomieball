@@ -1,10 +1,13 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/bevy-zoomieball",
     "crates/zoomieball-controller",
     "crates/zoomieball-core",
+    "crates/zoomieball-gpu",
     "crates/zoomieball-headless",
     "crates/zoomieball-render",
+    "crates/zoomieball-web",
 ]
 
 [workspace.package]
@@ -38,4 +41,3 @@ must_use_candidate = "allow"
 lto = "thin"
 codegen-units = 1
 panic = "abort"
-

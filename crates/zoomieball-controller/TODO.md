@@ -1,0 +1,34 @@
+# `zoomieball-controller` ownership
+
+The CPU Zoomie populations remain active as the compatibility implementation
+and serial oracle for GPU bring-up.
+
+- [x] **Alignment: change body and coach population clocks to 60 Hz and 15 Hz.**
+  - Prerequisite: the core request batch exposes the 60 Hz body tick and every-fourth-tick coach schedule.
+  - Normative anchor: controller pulse order in `../../GAME_TICK.md` and timing ABI in `../../docs/controller-abi.md`.
+  - Boundary test: coaches publish mailboxes before the same-tick body pulse, while oracle/motor refreshes do not repulse either population at 120 Hz.
+  - Completion command: `cargo test -p zoomieball-controller timing`.
+
+- [ ] **M0: conform fielder, goalie, and coach encodings without bypassing the batch API.**
+  - Prerequisite: core perception lanes, squad assignments, rewards, and typed requests are stable.
+  - Normative anchor: population topology and mailbox/cue contracts in `../../DESIGN.md` and `../../docs/controller-abi.md`.
+  - Boundary test: fovea, lane-layout, cue-charge, squad mailbox, and edge-logit fixtures pass for all three population families.
+  - Completion command: `cargo test -p zoomieball-controller encoding`.
+
+- [ ] **M0: update the local checkpoint header in place.**
+  - Prerequisite: final 60/15 timing fields and graph-v0 topology identifiers are known.
+  - Normative anchor: v0 persistence and sibling-wire-format constraints in `../../docs/controller-abi.md`.
+  - Boundary test: current checkpoints reject mismatched timing/topology cleanly, round-trip learning state and mailboxes, and no migration reader is introduced.
+  - Completion command: `cargo test -p zoomieball-controller checkpoint`.
+
+- [ ] **M0: expose controller and learning checksums independently.**
+  - Prerequisite: population stepping and scheduled learning conform to sibling Zoomie's serial semantics.
+  - Normative anchor: layered witness contract in `../../DESIGN.md` and checksum ABI in `../../docs/controller-abi.md`.
+  - Boundary test: inference-only mutation changes the controller checksum, learning mutation changes the learning checksum, and neither is inferred from the physics hash.
+  - Completion command: `cargo test -p zoomieball-controller checksum`.
+
+- [ ] **M0/M1: produce native/WASM controller goldens and retain 10v10 learning.**
+  - Prerequisite: timing, encodings, checkpoints, and checksum layers conform.
+  - Normative anchor: CPU fallback and deterministic schedule in `../../DESIGN.md`.
+  - Boundary test: native and WASM fixtures agree across inference and scheduled learning while a 10v10 compatibility match keeps all populations active.
+  - Completion command: `cargo test -p zoomieball-controller --test golden_replays && cargo check -p zoomieball-controller --target wasm32-unknown-unknown`.

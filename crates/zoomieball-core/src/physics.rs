@@ -1,10 +1,13 @@
-//! Fixed-substep arena, actuator, sphere-contact, and scoring physics.
+//! Deterministic CPU tracer for fixed-substep actuation, contact, and scoring.
 
+use crate::PHYSICS_SUBSTEPS;
 use crate::controller::MotorCommandBatch;
 use crate::fixed::{Fx, Vec3Fx};
 use crate::playbook::OracleIntentBatch;
 use crate::world::{ActionCharges, ContactFrame, Role, Team, World};
-use crate::{PHYSICS_SUBSTEPS, TICK_HZ};
+
+/// Baked Q16.16 duration of one nominal 120 Hz physics substep.
+pub const PHYSICS_DT: Fx = Fx::from_raw(546);
 
 /// White-cove interior and goal-mouth dimensions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +91,7 @@ pub struct PhysicsEvents {
     pub scorer: Option<Team>,
 }
 
-/// Apply commands and advance exactly two fixed substeps.
+/// Refresh oracle steering from latched commands and advance two fixed substeps.
 pub fn step(
     world: &mut World,
     intents: &OracleIntentBatch,
@@ -96,9 +99,9 @@ pub fn step(
     config: &PhysicsConfig,
 ) -> PhysicsEvents {
     assert_eq!(world.ids.len(), commands.commands.len());
-    apply_actuators(world, intents, commands, config);
     let mut events = PhysicsEvents::default();
     for _ in 0..PHYSICS_SUBSTEPS {
+        apply_actuators(world, intents, commands, config);
         integrate(world, config);
         for _ in 0..config.collision_iterations {
             collide_spheres(world, config.restitution);
@@ -162,15 +165,12 @@ fn apply_actuators(
 }
 
 fn integrate(world: &mut World, config: &PhysicsConfig) {
-    let dt = Fx::from_raw(
-        Fx::ONE_RAW / i32::try_from(TICK_HZ * PHYSICS_SUBSTEPS).expect("tick divisor fits i32"),
-    );
     for body in 0..world.ids.len() {
         let magnus = world.spins[body].cross(world.velocities[body]) * config.magnus;
-        world.velocities[body] += (magnus - Vec3Fx::Z * config.gravity) * dt;
+        world.velocities[body] += (magnus - Vec3Fx::Z * config.gravity) * PHYSICS_DT;
         world.velocities[body] = world.velocities[body] * config.drag;
         cap_speed(&mut world.velocities[body], config.speed_cap);
-        world.positions[body] += world.velocities[body] * dt;
+        world.positions[body] += world.velocities[body] * PHYSICS_DT;
         world.contacts[body] = ContactFrame {
             touching: false,
             normal: world.contacts[body].normal,
@@ -390,5 +390,15 @@ mod tests {
         }
         assert_eq!(first, second);
         assert!(first.positions[0].x < first.positions[1].x);
+    }
+
+    #[test]
+    fn motor_refreshes_before_each_physics_substep() {
+        let mut world = World::new(10);
+        let mut intents = still_intents(&world);
+        intents.intents[0].spin = Vec3Fx::X * Fx::from_i32(4);
+        let commands = MotorCommandBatch::with_len(world.ids.len());
+        step(&mut world, &intents, &commands, &PhysicsConfig::default());
+        assert!(world.spins[0].x > Fx::ONE);
     }
 }

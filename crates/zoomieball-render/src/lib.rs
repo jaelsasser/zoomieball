@@ -2,7 +2,72 @@
 
 //! Controller-independent packed render upload and camera/debug-view state.
 
-use zoomieball_core::{RayObservation, RenderInstance, RenderSnapshot};
+use zoomieball_core::{BodyId, RayObservation, World};
+
+/// One cosmetic sphere instance in a CPU presentation snapshot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C)]
+pub struct RenderInstance {
+    /// World position.
+    pub position: [f32; 3],
+    /// Linear velocity for render-only rolling orientation.
+    pub velocity: [f32; 3],
+    /// Radius.
+    pub radius: f32,
+    /// Team code (`0`, `1`, or `2` for neutral).
+    pub team: u32,
+    /// Local number, with `u32::MAX` for the objective.
+    pub local_id: u32,
+    /// Physical role code.
+    pub role: u32,
+}
+
+/// Reusable one-way cosmetic state published from the CPU implementation.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RenderSnapshot {
+    /// Completed authoritative tick represented by this frame.
+    pub tick: u64,
+    /// Packed sphere instances in canonical body order.
+    pub instances: Vec<RenderInstance>,
+}
+
+impl RenderSnapshot {
+    /// Allocate capacity for a world once.
+    #[must_use]
+    pub fn with_capacity(body_count: usize) -> Self {
+        Self {
+            tick: 0,
+            instances: Vec::with_capacity(body_count),
+        }
+    }
+
+    /// Replace this cosmetic publication from one authoritative CPU world.
+    pub fn publish(&mut self, world: &World) {
+        let view = world.view();
+        self.tick = world.tick();
+        self.instances.clear();
+        self.instances
+            .extend((0..view.len()).map(|index| RenderInstance {
+                position: [
+                    view.positions[index].x.to_f32(),
+                    view.positions[index].y.to_f32(),
+                    view.positions[index].z.to_f32(),
+                ],
+                velocity: [
+                    view.velocities[index].x.to_f32(),
+                    view.velocities[index].y.to_f32(),
+                    view.velocities[index].z.to_f32(),
+                ],
+                radius: view.radii[index].to_f32(),
+                team: view.teams[index].map_or(2, |team| team as u32),
+                local_id: match view.ids[index] {
+                    BodyId::Player { local, .. } => u32::from(local.get()),
+                    BodyId::Objective => u32::MAX,
+                },
+                role: view.roles[index] as u32,
+            }));
+    }
+}
 
 /// Projection and inspection mode selected for one frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -87,6 +152,12 @@ pub trait StorageUpload {
     fn upload_instances(&mut self, instances: &[RenderInstance]);
 }
 
+/// GPU-resident authoritative state exposed without CPU state transfer.
+pub trait ResidentStateSource {
+    /// Number of sphere instances already resident for vertex pulling.
+    fn instance_count(&self) -> usize;
+}
+
 /// Frame instrumentation proving the upload and readback contract.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FrameStats {
@@ -144,6 +215,15 @@ impl<U: StorageUpload> Renderer<U> {
         }
     }
 
+    /// Record a frame whose authoritative state is already GPU-resident.
+    pub fn render_resident(&mut self, source: &impl ResidentStateSource) -> FrameStats {
+        FrameStats {
+            uploads: 0,
+            readbacks: 0,
+            instances: source.instance_count(),
+        }
+    }
+
     /// Selected camera.
     #[must_use]
     pub const fn camera(&self) -> Camera {
@@ -188,6 +268,14 @@ mod tests {
         instances: usize,
     }
 
+    struct Resident(usize);
+
+    impl ResidentStateSource for Resident {
+        fn instance_count(&self) -> usize {
+            self.0
+        }
+    }
+
     impl StorageUpload for CountingUpload {
         fn upload_instances(&mut self, instances: &[RenderInstance]) {
             self.calls += 1;
@@ -220,6 +308,31 @@ mod tests {
         assert_eq!(stats.readbacks, 0);
         assert_eq!(renderer.upload_sink().calls, 1);
         assert_eq!(renderer.upload_sink().instances, 1);
+    }
+
+    #[test]
+    fn cpu_snapshot_publication_is_owned_by_the_render_layer() {
+        let world = World::new(10);
+        let mut snapshot = RenderSnapshot::with_capacity(world.view().len());
+        snapshot.publish(&world);
+        assert_eq!(snapshot.tick, 0);
+        assert_eq!(snapshot.instances.len(), 21);
+    }
+
+    #[test]
+    fn resident_frame_transfers_no_authoritative_state() {
+        let mut renderer = Renderer::new(
+            CountingUpload::default(),
+            SurfaceExtent {
+                width: 1366,
+                height: 768,
+            },
+        );
+        let stats = renderer.render_resident(&Resident(201));
+        assert_eq!(stats.uploads, 0);
+        assert_eq!(stats.readbacks, 0);
+        assert_eq!(stats.instances, 201);
+        assert_eq!(renderer.upload_sink().calls, 0);
     }
 
     #[test]

@@ -19,9 +19,10 @@ use zoomieball_core::fixed::{Fx, Vec3Fx};
 use zoomieball_core::hash::{OFFSET_BASIS, fold_i32, fold_u64};
 use zoomieball_core::perception::{RayObservation, Relation, SemanticTag};
 use zoomieball_core::world::{Role, Team};
+use zoomieball_core::{BODY_HZ, COACH_HZ, COACH_INTERVAL_TICKS};
 
-const BODY_DT: i32 = ONE / 64;
-const COACH_DT: i32 = ONE / 16;
+const BODY_DT: i32 = ONE / BODY_HZ.cast_signed();
+const COACH_DT: i32 = ONE / COACH_HZ.cast_signed();
 const OUTPUT_GATE: i32 = ONE / 4;
 const WEIGHT_SCALE: i32 = ONE / 2;
 const CHECKPOINT_MAGIC: &[u8; 4] = b"ZBCT";
@@ -133,13 +134,19 @@ impl ZoomieBackend {
         self.mailboxes[team.index()][squad]
     }
 
+    /// Signed coach logits for the current node's eight ordered edge ports.
+    #[must_use]
+    pub const fn edge_logits(&self, team: Team) -> [i32; 8] {
+        self.edge_logits[team.index()]
+    }
+
     /// Completed body controller pulses.
     #[must_use]
     pub const fn body_pulses(&self) -> u64 {
         self.body_pulses
     }
 
-    /// Completed 16 Hz coach pulses.
+    /// Completed 15 Hz coach pulses.
     #[must_use]
     pub const fn coach_pulses(&self) -> u64 {
         self.coach_pulses
@@ -196,7 +203,7 @@ impl ControllerBackend for ZoomieBackend {
         let body_env = PulseEnv { dt: BODY_DT, tick };
         let coach_env = PulseEnv {
             dt: COACH_DT,
-            tick: tick / 4,
+            tick: tick / u64::from(COACH_INTERVAL_TICKS),
         };
         ChunkedSchedule.learn(&mut self.fielders.pop, body_env);
         ChunkedSchedule.learn(&mut self.goalies.pop, body_env);
@@ -243,7 +250,7 @@ impl ControllerBackend for ZoomieBackend {
                 expected: self.header,
             });
         }
-        let mut reader = Reader::new(input, 18);
+        let mut reader = Reader::new(input, 22);
         let fielders = read_population(&mut reader, &self.fielders)?;
         let goalies = read_population(&mut reader, &self.goalies)?;
         let coaches = read_population(&mut reader, &self.coaches)?;
@@ -432,7 +439,7 @@ fn encode_coaches(
         NetMode::Deterministic,
         PulseEnv {
             dt: pool.dt,
-            tick: request.tick / 4,
+            tick: request.tick / u64::from(COACH_INTERVAL_TICKS),
         },
     );
     pool.pop.read_output_lanes(&mut pool.outputs);
@@ -731,6 +738,7 @@ fn write_header(output: &mut Vec<u8>, header: CheckpointHeader) {
     output.extend_from_slice(&header.lane_abi.to_le_bytes());
     output.extend_from_slice(&header.physics_abi.to_le_bytes());
     output.extend_from_slice(&header.reward_abi.to_le_bytes());
+    output.extend_from_slice(&header.schedule_abi.to_le_bytes());
     output.extend_from_slice(&header.active_per_team.to_le_bytes());
 }
 
@@ -875,15 +883,31 @@ mod tests {
     }
 
     #[test]
-    fn coach_runs_every_four_ticks_before_same_tick_body_evaluation() {
+    fn timing_sixty_body_pulses_include_fifteen_coach_publications() {
         let controller = ZoomieBackend::new(10, 9);
         let mut game = Match::new(MatchConfig::default(), playbook(), controller);
-        for _ in 0..5 {
+        for _ in 0..60 {
             game.tick();
         }
-        assert_eq!(game.controller().body_pulses(), 5);
-        assert_eq!(game.controller().coach_pulses(), 2);
+        assert_eq!(game.controller().body_pulses(), 60);
+        assert_eq!(game.controller().coach_pulses(), 15);
         assert_ne!(game.controller().mailbox(Team::Zero, 0), [0; 8]);
+    }
+
+    #[test]
+    fn timing_fresh_mailbox_is_encoded_into_the_same_tick_body_input() {
+        let controller = ZoomieBackend::new(10, 10);
+        let mut game = Match::new(MatchConfig::default(), playbook(), controller);
+        game.tick();
+
+        let controller = game.controller();
+        let mailbox = controller.mailboxes[Team::Zero.index()][1];
+        for (lane, value) in mailbox.into_iter().enumerate() {
+            assert_eq!(
+                controller.fielders.inputs.row(48 + lane)[0],
+                i32::midpoint(value.clamp(-ONE, ONE), ONE)
+            );
+        }
     }
 
     #[test]

@@ -1,48 +1,98 @@
 # Architecture
 
-## Missing boundary in conventional game loops
+## Scheduling and authority problem
 
-GPU physics, render-time interpolation, and per-entity controller calls allow scheduling and device differences to affect gameplay. They also make native-to-WASM replay parity impossible to diagnose: a render frame, controller allocation, or broad-phase iteration can silently change the authoritative order.
+A game loop that mixes render interpolation, per-entity controller calls, and unordered GPU collision work cannot explain a replay divergence. Device-dependent controller rates and GPU-to-CPU presentation readback also make the simulation authority depend on the delivery tier.
 
-Zoomieball instead admits one state transition at 64 Hz. Rendering consumes a converted snapshot and has no return edge.
+Zoomieball instead fixes one update schedule across every tier and keeps a permanent scalar CPU implementation. The CPU path is both a useful runtime and the conformance oracle for GPU bring-up. GPU authority is earned in lockstep, one witness layer at a time; rendering never feeds state back into either implementation.
 
-## Components
+## Runtime flow
 
 ```text
-play node -> intent --+                         +-> rewards -> learning
-world -> visibility -+-> controller -> command +-> physics -> hash -> snapshot
-teammate observations -> 16 Hz coach -> mailboxes --^
+                              one 60 Hz body tick
+
+match/play input -> graph-v0 assignments -> 180-degree perception
+                                               |
+                         every fourth tick: 15 Hz coaches
+                                               |
+                         same-tick squad mailboxes + edge logits
+                                               |
+                              60 Hz body Zoomies
+                                               |
+                              latched residuals and cue gates
+                                               |
+                  +----------------------------+----------------------------+
+                  |             two 120 Hz physics steps                   |
+                  | refresh oracle steering -> combine -> physics stages   |
+                  +----------------------------+----------------------------+
+                                               |
+                       rewards -> scheduled learning -> witnesses
+                                               |
+                 CPU: render-owned snapshot | GPU: resident buffers
 ```
 
-| Component | Owns | Does not own |
-|---|---|---|
-| `zoomieball-core` | World order, Q16.16 arithmetic, perception, actuation, physics, rewards, hashes | Learned network implementation, GPU objects |
-| `zoomieball-controller` | Zoomie populations, lane encoding, mailboxes, controller learning state | Physics policy, snapshots |
-| `zoomieball-render` | Packed cosmetic frame and one-upload invariant | Authoritative state or controller dependency |
-| `zoomieball-headless` | Match construction and reporting | Alternate simulation rules |
+The order is normative:
 
-Only `zoomieball-controller` depends on `~/Projects/zoomie`. The core can be tested with a typed deterministic backend; renderer publication therefore cannot pull a controller or GPU dependency into replay tests.
+1. Latch 60 Hz match and play input.
+2. Resolve graph-v0 squad assignments and the initial oracle intent.
+3. Build the complete forward 180-degree perception frame.
+4. Every fourth body tick, pulse both coaches and publish squad mailboxes for use later in the same tick.
+5. Pulse goalie and fielder populations, then latch their residuals and cue gates.
+6. Before each 120 Hz physics step, refresh oracle steering and combine it with the latched Zoomie output.
+7. Run the impulses-through-events physics stages specified by [GAME_TICK.md](../GAME_TICK.md#physics-substep-order).
+8. Accumulate rewards, run due learning, publish the layered witnesses, and expose presentation state.
 
-## Tick flow
+The schedule is 60 Hz for perception and embodied networks, 15 Hz for coaches, and 120 Hz for oracle refresh, motor combination, and physics. Device capability never changes these rates.
 
-The order is part of the replay ABI:
+## Packages
 
-1. Resolve the current cyclic play node and produce one oracle intent per physical body.
-2. Rebuild the deterministic spatial index and enumerate every unoccluded sphere in each forward hemisphere.
-3. On ticks divisible by four, run both coaches and publish eight squad mailboxes per team.
-4. Run goalie and fielder populations; the bodies consume the mailboxes from step 3 in the same tick.
-5. Decode spin residuals and gates, then consume surface and air cue charges.
-6. Run two fixed physics substeps and two canonical collision sweeps per substep.
-7. Generate rewards, learn, fold world/controller hashes, and replace the render snapshot.
+| Package | Owns | Neighbors | Current state |
+|---|---|---|---|
+| `zoomieball-core` | CPU scalar world, ten canonical physics words per body, separate match metadata, graph-v0, perception oracle, typed controller batches, rewards, replay witnesses | Controller backend and render publication boundary | Live tracer; normative physics bites pending |
+| `zoomieball-controller` | CPU fielder, goalie, and coach Zoomie populations; lane encoding; learning; squad mailboxes; edge logits; local checkpoint envelope | Sibling Zoomie CPU crates and `zoomieball-core` ABI | Live tracer |
+| `zoomieball-gpu` | Zoomieball WGSL physics and perception, topology selection, rewards, mailboxes, motor decoding, and parity diagnostics | `zoomie-gpu`, core oracle, renderer | Scaffold |
+| `zoomieball-render` | Raw controller-independent renderer, CPU presentation snapshot, GPU-resident state-source contract, cameras, contours, and perception inspection | Core state on CPU; resident buffers on GPU | CPU seam live; raw GPU renderer pending |
+| `bevy-zoomieball` | Published Bevy integration and example | Raw renderer | Scaffold; dependency pin blocked |
+| `zoomieball-web` | WebGPU shell, tier selection, Canvas2D compatibility presenter, DOM HUD, and import/export | GPU and render packages | Scaffold; dependency pin blocked |
+| `zoomieball-headless` | CPU match runner, golden replay debugger, benchmark, and CPU/GPU parity driver | Core, controller, later GPU | CPU runner live |
 
-The loop reuses caller-owned observation, intent, command, reward, and snapshot buffers. Initialization and playbook compilation may allocate.
+`zoomieball-controller` is the Zoomieball-owned CPU adapter. M2b adds a generic `zoomie-gpu` sibling crate beside the existing Zoomie workspace; it is not a Zoomieball package. That sibling owns generic GPU schedules for network families, gates, stepping, learning, outputs, and checksums. Zoomieball-specific perception, graph selection, rewards, mailboxes, and motor decoding remain in `zoomieball-gpu`. Existing sibling Zoomie persistence and arithmetic formats remain authoritative and are not versioned by this workspace.
 
-## Deterministic geometry
+## Execution tiers
 
-Positions, velocities, angular velocity, normals, depths, and controller lanes are Q16.16. Products widen to `i64` or `i128`; normalization uses an integer square root. Arena contact combines simultaneous inward plane normals, producing rounded corner and cove normals without a traversal-dependent manifold order. Sphere pairs are visited in ascending body index for a fixed number of sweeps.
+### Permanent CPU tier
 
-Perception casts a target-directed ray for every candidate sphere. The hemisphere boundary and physical occlusion are the only filters. The grid counting-sorts each sphere into every cell touched by its radius-expanded AABB; integer voxel traversal then tests the uncapped contents of only the cells crossed by a target ray. The grid remains an accelerator rather than a semantic authority: brute-force tests pin default, boundary, occlusion, distant-target, and 16 diagonal fixture outputs.
+The scalar path supplies deterministic conformance, native and WASI headless runs, golden replay production, and the permanent 10v10 Canvas2D fallback. Its spatial grid is an accelerator only: target-directed brute force remains the perception oracle for equivalence, occlusion, boundary, fovea, and distant-target tests.
 
-## Limits
+The live implementation is an end-to-end tracer through play selection, perception, CPU Zoomie inference and learning, physics, witnesses, and presentation publication. The witness types and layering are in place, but the arithmetic, arena SDF, collision stages, cue model, and golden replay corpus do not yet conform to M0. Those gaps stay visible in package `TODO.md` files rather than being hidden behind a prototype archive.
 
-The current renderer crate pins the packed upload contract but does not create a WebGPU device or shaders. Goal mouths are physical openings in the end walls, but their surrounding cove is represented by combined plane contacts rather than a higher-order analytic fillet. Registry transport, multiplayer, coach-authored play traversal, and GPU-authoritative physics are outside this architecture.
+### Lockstep GPU bring-up
+
+M2a keeps the CPU match authoritative and feeds its commands into GPU physics. Every physics step compares the normative commutative `u32` state hash. A first mismatch selects the earliest step, after which intermediate stage hashes bisect the divergence.
+
+M2b runs GPU Zoomie inference and learning beside the sibling Zoomie serial/population oracle. Physics, controller, and learning witnesses must all match before the CPU shadow can leave the primary WebGPU path.
+
+### GPU-resident primary tier
+
+After parity, simulation, perception, Zoomie execution, learning, and raw rendering remain resident on the GPU. Presentation consumes resident buffers directly. Routine frames perform no authoritative-state upload and no state readback; small explicit diagnostics such as witnesses and sorted events cross the boundary when enabled. The CPU implementation remains available as fallback and oracle.
+
+## State and witness boundaries
+
+Each physical body has ten canonical physics words: three position, three velocity, three spin, and one flags word. The flags word carries only the canonical team, objective, contact, and charge bits. Full typed IDs, roles, squads, contact frames, scores, graph state, and other match metadata remain available to the CPU model without widening that ten-word GPU layout.
+
+| `TickHash` field | Width | Source and purpose |
+|---|---:|---|
+| `physics` | `u32` | `World::physics_hash()`: wrapping sum of per-body hashes, commutative across GPU workgroups and normative for CPU/WGSL parity |
+| `controller` | `u64` | `ControllerBackend::controller_hash()`: network parameters and transient controller state |
+| `learning` | `u64` | `ControllerBackend::learning_hash()`: eligibility, reward, and learning-rule state |
+| `pipeline` | `u64` | Diagnostic fold over ABI words, graph state, `World::diagnostic_hash()`, and the three component witnesses |
+
+Raw equality between an original and mirrored hash stream is not a conformance rule. A transformed mirrored-state comparison remains blocked until polar and axial vectors, team labels, commands, IDs, and event records all have explicit mirror mappings.
+
+## Presentation boundary
+
+Cosmetic `f32` conversion belongs to `zoomieball-render`, not `zoomieball-core` and not the controller ABI. The CPU source calls `RenderSnapshot::publish(&World)` and `Renderer::render()` performs one packed upload per presentation update. The GPU source implements `ResidentStateSource`; `Renderer::render_resident()` records zero authoritative uploads and zero readbacks. Cameras, device-pixel ratio, interpolation, contours, labels, orientation quaternions, and inspector overlays are non-authoritative.
+
+## Open decisions
+
+Scoring details, final arena values, palette, font, Bevy and wgpu versions, graph trigger representation, and per-ball verb/target shapes remain explicit TODOs. The checked-in playbook is therefore a cyclic graph-v0 tracer rather than a provisional encoding of those unresolved policies. The 10v10 CPU/Canvas2D realtime goal and 100v100 WebGPU target are performance requirements, not alternate update schedules.

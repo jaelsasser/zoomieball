@@ -6,7 +6,7 @@ use crate::fixed::{Fx, Vec3Fx};
 use crate::perception::ObservationBatch;
 use crate::playbook::OracleIntentBatch;
 use crate::world::{Team, WorldView};
-use crate::{LANE_ABI_VERSION, PHYSICS_ABI_VERSION, REWARD_ABI_VERSION};
+use crate::{LANE_ABI_VERSION, PHYSICS_ABI_VERSION, REWARD_ABI_VERSION, SCHEDULE_ABI_VERSION};
 
 /// One decoded body motor command.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -104,6 +104,8 @@ pub struct CheckpointHeader {
     pub physics_abi: u32,
     /// Reward ABI recorded with learned state.
     pub reward_abi: u32,
+    /// Fixed controller and physics schedule ABI.
+    pub schedule_abi: u32,
     /// Active physical bodies per team.
     pub active_per_team: u16,
 }
@@ -116,6 +118,7 @@ impl CheckpointHeader {
             lane_abi: LANE_ABI_VERSION,
             physics_abi: PHYSICS_ABI_VERSION,
             reward_abi: REWARD_ABI_VERSION,
+            schedule_abi: SCHEDULE_ABI_VERSION,
             active_per_team,
         }
     }
@@ -203,10 +206,14 @@ impl ControllerBackend for IdleController {
         output.extend_from_slice(&self.header.lane_abi.to_le_bytes());
         output.extend_from_slice(&self.header.physics_abi.to_le_bytes());
         output.extend_from_slice(&self.header.reward_abi.to_le_bytes());
+        output.extend_from_slice(&self.header.schedule_abi.to_le_bytes());
         output.extend_from_slice(&self.header.active_per_team.to_le_bytes());
     }
 
     fn restore(&mut self, input: &[u8]) -> Result<(), CheckpointError> {
+        if input.len() != 18 {
+            return Err(CheckpointError::Malformed);
+        }
         let actual = decode_header(input)?;
         if actual != self.header {
             return Err(CheckpointError::AbiMismatch {
@@ -226,9 +233,9 @@ impl ControllerBackend for IdleController {
     }
 }
 
-/// Decode the common 14-byte checkpoint header.
+/// Decode the common 18-byte checkpoint header.
 pub fn decode_header(input: &[u8]) -> Result<CheckpointHeader, CheckpointError> {
-    if input.len() < 14 {
+    if input.len() < 18 {
         return Err(CheckpointError::Malformed);
     }
     let word = |offset| {
@@ -242,8 +249,9 @@ pub fn decode_header(input: &[u8]) -> Result<CheckpointHeader, CheckpointError> 
         lane_abi: word(0),
         physics_abi: word(4),
         reward_abi: word(8),
+        schedule_abi: word(12),
         active_per_team: u16::from_le_bytes(
-            input[12..14]
+            input[16..18]
                 .try_into()
                 .expect("bounds checked by the checkpoint length guard"),
         ),
@@ -270,5 +278,31 @@ pub(crate) fn accumulate_team_rewards(
         if let Some(scorer) = scorer {
             reward.event += if *team == scorer { Fx::ONE } else { -Fx::ONE };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_checkpoint_header_binds_the_fixed_schedule() {
+        let controller = IdleController::new(10);
+        let mut checkpoint = Vec::new();
+        controller.checkpoint(&mut checkpoint);
+        assert_eq!(checkpoint.len(), 18);
+        assert_eq!(decode_header(&checkpoint).unwrap().schedule_abi, 1);
+    }
+
+    #[test]
+    fn idle_checkpoint_rejects_trailing_payload() {
+        let mut controller = IdleController::new(10);
+        let mut checkpoint = Vec::new();
+        controller.checkpoint(&mut checkpoint);
+        checkpoint.push(0);
+        assert_eq!(
+            controller.restore(&checkpoint),
+            Err(CheckpointError::Malformed)
+        );
     }
 }
