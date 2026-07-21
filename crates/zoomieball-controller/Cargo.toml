@@ -1,0 +1,15 @@
+[package]
+name = "zoomieball-controller"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zoomieball-core.workspace = true
+zoomie-core.workspace = true
+zoomie-math.workspace = true
+zoomie-pop.workspace = true
+
+[lints]
+workspace = true
+

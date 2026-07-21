@@ -1,0 +1,12 @@
+[package]
+name = "zoomieball-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zoomieball-core.workspace = true
+
+[lints]
+workspace = true
+

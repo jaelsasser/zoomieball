@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/zoomieball-controller",
+    "crates/zoomieball-core",
+    "crates/zoomieball-headless",
+    "crates/zoomieball-render",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+zoomieball-core = { path = "crates/zoomieball-core" }
+zoomieball-controller = { path = "crates/zoomieball-controller" }
+zoomieball-render = { path = "crates/zoomieball-render" }
+zoomie-core = { path = "../zoomie/crates/zoomie-core" }
+zoomie-math = { path = "../zoomie/crates/zoomie-math" }
+zoomie-pop = { path = "../zoomie/crates/zoomie-pop" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
