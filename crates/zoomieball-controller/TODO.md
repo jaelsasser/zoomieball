@@ -15,16 +15,22 @@ and serial oracle for GPU bring-up.
   - Boundary test: fovea, lane-layout, cue-charge, squad mailbox, and edge-logit fixtures pass for all three population families.
   - Completion command: `cargo test -p zoomieball-controller encoding`.
 
+- [ ] **M0: settle the observation encoding frame across all three populations.**
+  - Prerequisite: the observation encoding frame is acknowledged in the root roadmap.
+  - Normative anchor: lane layout as a conformance surface in `../../DESIGN.md` and the blocked semantic-mirror mapping list in `../../GAME_TICK.md`.
+  - Boundary test: one tactical situation and its team-exchanged mirror drive the fielder retina, goalie foveae, coach union retina, oracle-direction, and proprioception lanes to the acknowledged frame's mapping, `receptor` reads that frame rather than raw world-space sign octants, and `encode_goalie_foveae` takes no ignored `Team` parameter.
+  - Completion command: `cargo test -p zoomieball-controller --test encoding_frame`.
+
 - [ ] **M0: update the local checkpoint header in place.**
   - Prerequisite: final 60/15 timing fields and graph-v0 topology identifiers are known.
   - Normative anchor: v0 persistence and sibling-wire-format constraints in `../../docs/controller-abi.md`.
   - Boundary test: current checkpoints reject mismatched timing/topology cleanly, round-trip learning state and mailboxes, and no migration reader is introduced.
   - Completion command: `cargo test -p zoomieball-controller checkpoint`.
 
-- [ ] **M0: expose controller and learning checksums independently.**
-  - Prerequisite: population stepping and scheduled learning conform to sibling Zoomie's serial semantics.
-  - Normative anchor: layered witness contract in `../../DESIGN.md` and checksum ABI in `../../docs/controller-abi.md`.
-  - Boundary test: inference-only mutation changes the controller checksum, learning mutation changes the learning checksum, and neither is inferred from the physics hash.
+- [ ] **M0: expose controller and learning checksums independently over their complete word sets.**
+  - Prerequisite: population stepping and scheduled learning conform to sibling Zoomie's serial semantics, and the backend folds sibling `Population::<SparseCtrnn>::inference_pair` and `learning_pair` rather than `checksum_pair`, which reaches the state row alone.
+  - Normative anchor: layered witness contract in `../../DESIGN.md` and the `controller`/`learning` witness rows in `../../docs/controller-abi.md`.
+  - Boundary test: a mutated live weight changes the controller checksum, a mutated eligibility, anchor, or credit-age word changes the learning checksum, neither witness reaches the other's words or is inferred from the physics hash, and no act or learn pulse allocates.
   - Completion command: `cargo test -p zoomieball-controller checksum`.
 
 - [ ] **M0/M1: produce native/WASM controller goldens and retain 10v10 learning.**

@@ -11,9 +11,15 @@ normative for design intent.
 Zoomieball combines three systems that are easy to make independently and hard to
 keep coherent together: a deterministic fixed-point sport, recurrent learned
 controllers, and a GPU-resident renderer. A GPU-only implementation lacks a portable
-oracle and excludes machines without usable WebGPU. A CPU-only implementation cannot
-meet the 100v100 target. A playbook-only controller omits the Zoomie Net control path
-that turns formation intent into embodied behavior.
+oracle and excludes machines without usable WebGPU. A playbook-only controller omits
+the Zoomie Net control path that turns formation intent into embodied behavior.
+
+The CPU tier is not the constraint it was assumed to be. The tracer sustains 100v100
+at 1.89x realtime natively and 1.34x under WASI, measured over 7200 body ticks with
+identical pipeline witnesses on both tiers. That measurement carries two caveats: it
+is the tracer, not the conforming physics M0 replaces it with, and the WASI margin is
+thin enough that presentation cost can erase it. The GPU path is therefore justified
+by the 1000-per-side stretch and by resident rendering, not by 100v100.
 
 The repository therefore retains the existing CPU simulation, perception,
 controller, playbook, renderer seam, and headless runner as production architecture.
@@ -334,16 +340,22 @@ The witness layers are:
 |---|---|
 | Alignment | Seven green packages, ownership TODOs, reconciled docs, 60/15/120 clocks, render-owned cosmetic snapshots, and honest tracer labels |
 | M0 — conforming CPU | Public tracer from graph selection through presentation; exact arithmetic and constants; canonical words; arena, motor, contacts, Jacobi pairs, caps, events; extended graph-v0; native/WASM/WASI golden witnesses |
-| M1 — CPU compatibility | Fixed-camera Canvas2D over CPU snapshots; complete 10v10 physics, perception, Zoomie inference/learning, HUD, labels, feel tuning, and realtime benchmark |
+| M1 — CPU compatibility | Fixed-camera Canvas2D over CPU snapshots; complete 10v10 physics, perception, Zoomie inference/learning, HUD, labels, feel tuning, and a binding 100v100 realtime benchmark on native and WASM |
 | M2a — GPU physics shadow | WGSL fixed helpers and physics stages; CPU-produced commands; per-step physics parity; first-divergence and stage bisection |
 | M2b — GPU Zoomie | Generic sibling GPU schedules bit-identical to Zoomie's serial oracle; Zoomieball integration; controller and learning parity; shadow removal only after all witnesses pass |
 | M3 — rendering | Raw renderer, GPU-resident source, hard-light arena, Bevy wrapper, free camera, contours, and perception inspector |
 | M4 — playbook | GPU graph-v0 evaluation and checked-in plays after trigger and verb shapes are acknowledged |
-| M5 — application | WebGPU shell, tier selection, DOM HUD, Canvas2D fallback, import/export, and device profiling |
+| M5a — Canvas2D application | Application shell over the CPU tier alone: DOM HUD, import/export, and tier selection that resolves to Canvas2D |
+| M5b — WebGPU application | WebGPU primary path and device profiling inside the M5a shell |
 
 The CPU target is realtime 10v10 including Canvas2D, perception, inference, and
-learning. The WebGPU target remains 100v100. Formatting, workspace tests, Clippy with
-warnings denied, native builds, and WASM checks gate each completed bite.
+learning, and 100v100 without presentation. The WebGPU target is 100v100 with resident
+rendering. Formatting, workspace tests, Clippy with warnings denied, native builds, and
+WASM checks gate each completed bite.
+
+M5a depends on M1 alone. Splitting the shell keeps every GPU phase intact while
+removing the GPU program from the path to something playable, which is also the only
+way the playbook's legibility reaches real players before M4.
 
 ## Settled constraints
 
