@@ -22,7 +22,9 @@ target/release/zoomieball-headless 10 60 --hashes
 node --no-warnings scripts/run-wasi.mjs target/wasm32-wasip1/release/zoomieball-headless.wasm 10 60 --hashes
 ```
 
-`--hashes` emits `physics`, `controller`, `learning`, and `pipeline` fields and omits wall-clock data, so the two streams can be compared byte-for-byte. Their layering and widths already match [the controller ABI](docs/controller-abi.md#witnesses); golden M0 conformance still depends on replacing the tracer physics and control behaviors beneath them.
+`--hashes` emits `physics`, `controller`, `learning`, and `pipeline` fields per tick, then a closing `checkpoint bytes=… fold=…` line, and omits wall-clock data, so the two streams can be compared byte-for-byte. The witness fields compare arithmetic; the checkpoint line compares the persisted byte format, which is the other thing a target can diverge on and no witness can see. Their layering and widths already match [the controller ABI](docs/controller-abi.md#witnesses); golden M0 conformance still depends on replacing the tracer physics and control behaviors beneath them.
+
+The `10 60` invocation above is the fixture `crates/zoomieball-controller/tests/witness_golden.rs` commits constants for, so both streams reproduce that test's four pinned values on their own target.
 
 ## Building
 

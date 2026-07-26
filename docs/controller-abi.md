@@ -87,11 +87,15 @@ No trigger or verb syntax is implied by the current fixture. Those forms require
 | `TickHash` field | Type and source | Use |
 |---|---|---|
 | `physics` | `u32`, `World::physics_hash()` | Commutative hash of canonical per-body physics words; normative CPU/WGSL comparison |
-| `controller` | `u64`, `ControllerBackend::controller_hash()` | Sibling Zoomie inference and transient-state parity |
-| `learning` | `u64`, `ControllerBackend::learning_hash()` | Eligibility, rewards, gates, and parameter-update parity |
+| `controller` | `u64`, `ControllerBackend::controller_hash()` | Sibling Zoomie `inference_pair` parity — live weights, node states — plus the coach mailboxes and edge logits |
+| `learning` | `u64`, `ControllerBackend::learning_hash()` | Sibling Zoomie `learning_pair` parity — anchors, exploration keys, eligibility, credit ages — plus each pool's `ExploratoryHebbRule` dials, the accumulated team rewards, and the learning-pass counter |
 | `pipeline` | `u64`, diagnostic fold | ABI words, play node, `World::diagnostic_hash()`, and the three component witnesses for replay localization |
 
-The physics hash is schedule-independent because per-body hashes combine with wrapping addition. Controller and learning checksums retain sibling Zoomie's established arithmetic and wire semantics. Each component witness folds its own layer and no other, so a divergence localizes to the single word that moved; `REPLAY_ABI_VERSION = 2` identifies the fold in which `learning` stopped absorbing `controller`. The pipeline fold is diagnostic; equality of that fold alone does not replace component comparison.
+The physics hash is schedule-independent because per-body hashes combine with wrapping addition. Controller and learning checksums retain sibling Zoomie's established arithmetic and wire semantics. Each component witness folds its own layer and no other, so a divergence localizes to the single word that moved.
+
+Localization is unconditional, but read-set coverage is not: every pool arms a learning rule, so an armed `step` reads the exploration key and dials and writes eligibility and the credit age before any learn pass runs. `controller` alone therefore never answers "will these two step alike" — that question needs both witnesses, and the `learning` witness is where the update rule's own parameters live. Two backends agreeing on `controller` may still be about to diverge.
+
+`REPLAY_ABI_VERSION = 3` identifies the fold in which the component witnesses moved onto sibling Zoomie's split population witnesses and `learning` took each pool's rule dials. The word names the fold, not the state: records carrying different words are incomparable, and a mismatch there is an ABI change rather than state drift. The pipeline fold is diagnostic; equality of that fold alone does not replace component comparison.
 
 Mirrored-state conformance does not compare raw hash values. A future transformed comparison must first specify mappings for polar vectors, axial vectors, team labels, commands, IDs, and event records.
 
@@ -109,7 +113,9 @@ Restore validates the complete local header and payload shape before mutating a 
 | 12 | little-endian `u32` | `schedule_abi` |
 | 16 | little-endian `u16` | `active_per_team` |
 
-`schedule_abi = 1` identifies the fixed 60 Hz body, 15 Hz coach, and 120 Hz oracle/motor/physics contract. `ZoomieBackend` prefixes the common header with the four bytes `ZBCT`, so its backend payload starts at byte 22. That payload retains the three populations, mailboxes, edge logits, accumulated team rewards, and the body-pulse, coach-pulse, and learning-pass counters needed for a bit-identical controller resume.
+`schedule_abi = 1` identifies the fixed 60 Hz body, 15 Hz coach, and 120 Hz oracle/motor/physics contract. `ZoomieBackend` prefixes the common header with the four bytes `ZBCT`, so its backend payload starts at byte 22.
+
+That payload is a little-endian `u32` length prefix, then one `zoomie-wire` `ZNETLIVE` pack, then the backend-local transient tail. The wire pack owns the three populations with their specs, configs, learning rules, and capability manifests, plus the resume cursor; `zoomie-wire` recomputes each expected manifest on decode, so a capability divergence is rejected at the boundary instead of resuming into a silent desync. The length prefix is load-bearing: `decode_live` rejects trailing bytes and so must be handed an exact slice, which the fixed-width tail behind it would otherwise deny it. The tail carries the mailboxes, edge logits, accumulated team rewards, and the body-pulse, coach-pulse, and learning-pass counters. Together they are a bit-identical controller resume, including the rule dials — which the restoring backend adopts from the checkpoint rather than keeping its own, since those dials steer the trajectory and belong to the persisted team.
 
 The checkpoint envelope is local test data rather than a stable import contract. No migration reader is required for a Zoomieball-local header change.
 
@@ -122,5 +128,5 @@ The checkpoint envelope is local test data rather than a stable import contract.
 | Physics (`PHYSICS_ABI_VERSION`) | 1 | Zoomieball-local v0 |
 | Reward (`REWARD_ABI_VERSION`) | 1 | Zoomieball-local v0 |
 | Fixed schedule (`SCHEDULE_ABI_VERSION`) | 1 | Required identity: 60 Hz body, 15 Hz coach, 120 Hz oracle/motor/physics |
-| Replay fold (`REPLAY_ABI_VERSION`) | 2 | Zoomieball-local v0 |
+| Replay fold (`REPLAY_ABI_VERSION`) | 3 | Zoomieball-local v0; bump on any change to a component witness fold |
 | Sibling Zoomie arithmetic and persistence | Established by Zoomie | Preserve its wire formats |

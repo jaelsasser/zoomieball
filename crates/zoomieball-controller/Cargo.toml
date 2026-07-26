@@ -9,6 +9,7 @@ zoomieball-core.workspace = true
 zoomie-core.workspace = true
 zoomie-math.workspace = true
 zoomie-pop.workspace = true
+zoomie-wire.workspace = true
 
 [lints]
 workspace = true

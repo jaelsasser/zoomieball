@@ -42,5 +42,6 @@ pub const PHYSICS_ABI_VERSION: u32 = 1;
 pub const REWARD_ABI_VERSION: u32 = 1;
 /// Version of the fixed controller and physics schedule.
 pub const SCHEDULE_ABI_VERSION: u32 = 1;
-/// Version of the replay hash fold.
-pub const REPLAY_ABI_VERSION: u32 = 2;
+/// Version of the replay hash fold: bumped whenever a component witness changes value, so two
+/// records carrying different words are known to be incomparable rather than read as state drift.
+pub const REPLAY_ABI_VERSION: u32 = 3;

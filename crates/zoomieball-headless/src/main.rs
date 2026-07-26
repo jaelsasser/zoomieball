@@ -4,6 +4,8 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use zoomieball_controller::ZoomieBackend;
+use zoomieball_core::controller::ControllerBackend;
+use zoomieball_core::hash::{OFFSET_BASIS, fold_bytes};
 use zoomieball_core::{BODY_HZ, COACH_HZ, Match, MatchConfig, PHYSICS_HZ, Playbook, TICK_HZ};
 
 fn main() -> ExitCode {
@@ -65,6 +67,15 @@ fn run() -> Result<(), String> {
             PHYSICS_HZ,
             game.last_hash().pipeline,
             game.world().scores(),
+        );
+        // The witness lines above compare arithmetic; this line compares the checkpoint's byte
+        // format, which is the other thing a target can diverge on and no witness can see.
+        let mut envelope = Vec::new();
+        game.controller().checkpoint(&mut envelope);
+        println!(
+            "checkpoint bytes={} fold={:016x}",
+            envelope.len(),
+            fold_bytes(OFFSET_BASIS, &envelope),
         );
         return Ok(());
     }

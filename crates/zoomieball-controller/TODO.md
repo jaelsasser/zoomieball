@@ -26,8 +26,9 @@ and serial oracle for GPU bring-up.
   - Normative anchor: v0 persistence and sibling-wire-format constraints in `../../docs/controller-abi.md`.
   - Boundary test: current checkpoints reject mismatched timing/topology cleanly, round-trip learning state and mailboxes, and no migration reader is introduced.
   - Completion command: `cargo test -p zoomieball-controller checkpoint`.
+  - Progress: the population payload now rides `zoomie-wire`'s length-prefixed `ZNETLIVE` pack, which carries the specs, configs, rules, manifests, and resume cursor and validates the recomputed capability manifest on decode; only the graph-v0 topology identifiers in the local header remain, and they are still unacknowledged.
 
-- [ ] **M0: expose controller and learning checksums independently over their complete word sets.**
+- [x] **M0: expose controller and learning checksums independently over their complete word sets.**
   - Prerequisite: population stepping and scheduled learning conform to sibling Zoomie's serial semantics, and the backend folds sibling `Population::<SparseCtrnn>::inference_pair` and `learning_pair` rather than `checksum_pair`, which reaches the state row alone.
   - Normative anchor: layered witness contract in `../../DESIGN.md` and the `controller`/`learning` witness rows in `../../docs/controller-abi.md`.
   - Boundary test: a mutated live weight changes the controller checksum, a mutated eligibility, anchor, or credit-age word changes the learning checksum, neither witness reaches the other's words or is inferred from the physics hash, and no act or learn pulse allocates.
@@ -38,3 +39,4 @@ and serial oracle for GPU bring-up.
   - Normative anchor: CPU fallback and deterministic schedule in `../../DESIGN.md`.
   - Boundary test: native and WASM fixtures agree across inference and scheduled learning while a 10v10 compatibility match keeps all populations active.
   - Completion command: `cargo test -p zoomieball-controller --test golden_replays && cargo check -p zoomieball-controller --target wasm32-unknown-unknown`.
+  - Progress: `tests/witness_golden.rs` pins both component witnesses and the checkpoint bytes for a fixed 10v10 match, reproduced identically by `zoomieball-headless 10 60 --hashes` on native and wasm32-wasip1; it deliberately asserts nothing about lane semantics, so the full replay goldens stay blocked behind the observation encoding frame decision and the two encoding bites above it.
