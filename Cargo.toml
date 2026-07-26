@@ -19,9 +19,10 @@ license = "MIT"
 zoomieball-core = { path = "crates/zoomieball-core" }
 zoomieball-controller = { path = "crates/zoomieball-controller" }
 zoomieball-render = { path = "crates/zoomieball-render" }
-zoomie-core = { path = "../zoomie/crates/zoomie-core" }
-zoomie-math = { path = "../zoomie/crates/zoomie-math" }
-zoomie-pop = { path = "../zoomie/crates/zoomie-pop" }
+zoomie-core = { path = "../zoomienet/crates/zoomie-core" }
+zoomie-math = { path = "../zoomienet/crates/zoomie-math" }
+zoomie-pop = { path = "../zoomienet/crates/zoomie-pop" }
+zoomie-wire = { path = "../zoomienet/crates/zoomie-wire" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

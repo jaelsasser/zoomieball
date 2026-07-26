@@ -24,6 +24,17 @@ node --no-warnings scripts/run-wasi.mjs target/wasm32-wasip1/release/zoomieball-
 
 `--hashes` emits `physics`, `controller`, `learning`, and `pipeline` fields and omits wall-clock data, so the two streams can be compared byte-for-byte. Their layering and widths already match [the controller ABI](docs/controller-abi.md#witnesses); golden M0 conformance still depends on replacing the tracer physics and control behaviors beneath them.
 
+## Building
+
+Zoomieball path-depends on sibling [Zoomie](https://github.com/jaelsasser/zoomie) for `zoomie-core`, `zoomie-math`, and `zoomie-pop`, and expects that checkout beside this one:
+
+```
+zoomieball/
+zoomienet/
+```
+
+Cargo builds whatever revision is checked out there, uncommitted edits included, and nothing here records which one. Witnesses and golden replays are therefore reproducible only against a sibling revision you have tracked by hand.
+
 ## Packages
 
 | Package | Responsibility | Current state |
