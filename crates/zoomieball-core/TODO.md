@@ -9,11 +9,23 @@ engine, and compatibility-tier simulation. Local v0 schemas change in place.
   - Boundary test: one public call crosses graph selection, perception, coach/body batches, motor combination, two physics steps, rewards, four witnesses, and presentation publication.
   - Completion command: `cargo test -p zoomieball-headless --test pipeline`.
 
-- [ ] **M0: conform fixed arithmetic, constants, and canonical physics words.**
+- [x] **M0: conform the exact fixed-point kernels.**
   - Prerequisite: the M0 tracer fails on the first nonconforming arithmetic fixture.
-  - Normative anchor: fixed-point arithmetic and canonical ten-word body state in `../../GAME_TICK.md`.
-  - Boundary test: exact integer square root and boundary cases survive while match metadata cannot enter the ten-word physics hash payload.
-  - Completion command: `cargo test -p zoomieball-core`.
+  - Normative anchor: required arithmetic helpers and determinism rules in `../../GAME_TICK.md`.
+  - Boundary test: public vectors cover signed multiply and divide, integer square root, vector length and normalization, widened products, wrapping arithmetic, and rejected precondition violations.
+  - Completion command: `cargo test -p zoomieball-core --test fixed_conformance`.
+
+- [ ] **M0: centralize the baked physics constants.**
+  - Prerequisite: fixed-point kernels conform and the decimal-to-Q16 baking policy is acknowledged.
+  - Normative anchor: the constants table and single-source rule in `../../GAME_TICK.md`.
+  - Boundary test: the CPU defaults consume one typed Rust source of raw Q16.16 words suitable for later WGSL emission; tracer literals and shadow copies are absent.
+  - Completion command: `cargo test -p zoomieball-core --test physics_constants`.
+
+- [ ] **M0: conform the canonical physics words.**
+  - Prerequisite: fixed-point kernels and baked constants conform.
+  - Normative anchor: canonical physics words and match metadata in `../../GAME_TICK.md`.
+  - Boundary test: exact position, velocity, spin, team, game-ball, grounded, charge, and cooldown words feed hard-coded body and world hashes while match metadata cannot enter the payload.
+  - Completion command: `cargo test -p zoomieball-core --test canonical_state`.
 
 - [ ] **M0: replace arena and physics stages in tested bites.**
   - Prerequisite: canonical words and fixed helpers conform.

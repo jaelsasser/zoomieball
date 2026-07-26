@@ -3,6 +3,54 @@
 use std::fmt;
 use std::ops::{Add, AddAssign, Div, Mul, Neg, Sub, SubAssign};
 
+/// Return the exact signed product of two canonical words.
+#[must_use]
+pub fn mul64(lhs: i32, rhs: i32) -> i64 {
+    i64::from(lhs) * i64::from(rhs)
+}
+
+/// Multiply two raw Q16.16 words with truncation toward zero.
+///
+/// # Panics
+///
+/// Panics when the exact Q16.16 result does not fit in `i32`.
+#[must_use]
+pub fn qmul(lhs: i32, rhs: i32) -> i32 {
+    let magnitude = u64::from(lhs.unsigned_abs()) * u64::from(rhs.unsigned_abs());
+    signed_magnitude(magnitude >> Fx::FRACTION_BITS, (lhs < 0) ^ (rhs < 0))
+}
+
+/// Divide two raw Q16.16 words with truncation toward zero.
+///
+/// # Panics
+///
+/// Panics when `rhs` is zero or the exact Q16.16 result does not fit in `i32`.
+#[must_use]
+pub fn qdiv(lhs: i32, rhs: i32) -> i32 {
+    assert_ne!(rhs, 0, "fixed-point division by zero");
+    let numerator = u64::from(lhs.unsigned_abs()) << Fx::FRACTION_BITS;
+    let magnitude = numerator / u64::from(rhs.unsigned_abs());
+    signed_magnitude(magnitude, (lhs < 0) ^ (rhs < 0))
+}
+
+/// Return `floor(sqrt(value))` for the complete `u64` input domain.
+#[must_use]
+pub fn isqrt64(value: u64) -> u32 {
+    if value < 2 {
+        return u32::try_from(value).expect("values below two fit u32");
+    }
+
+    let bits = u64::BITS - value.leading_zeros();
+    let mut root = 1u64 << bits.div_ceil(2);
+    loop {
+        let next = u64::midpoint(root, value / root);
+        if next >= root {
+            return u32::try_from(root).expect("the square root of u64 fits u32");
+        }
+        root = next;
+    }
+}
+
 /// Signed Q16.16 value.
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
@@ -33,9 +81,17 @@ impl Fx {
     }
 
     /// Construct an exactly representable integer.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `value` lies outside the Q16.16 integer range.
     #[must_use]
     pub const fn from_i32(value: i32) -> Self {
-        Self(value.saturating_mul(Self::ONE_RAW))
+        assert!(
+            value >= -32_768 && value <= 32_767,
+            "integer does not fit Q16.16"
+        );
+        Self(value * Self::ONE_RAW)
     }
 
     /// Convert at the cosmetic rendering boundary.
@@ -45,10 +101,10 @@ impl Fx {
         self.0 as f32 / Self::ONE_RAW as f32
     }
 
-    /// Absolute value, saturating at the positive bound.
+    /// Two's-complement wrapping absolute value.
     #[must_use]
     pub const fn abs(self) -> Self {
-        Self(self.0.saturating_abs())
+        Self(self.0.wrapping_abs())
     }
 
     /// Clamp between two fixed values.
@@ -66,30 +122,27 @@ impl Fx {
     /// Return `-1`, `0`, or `1` as Q16.16.
     #[must_use]
     pub const fn signum(self) -> Self {
-        Self(self.0.signum().saturating_mul(Self::ONE_RAW))
+        Self(self.0.signum() * Self::ONE_RAW)
     }
 
     /// Widened multiply with one final Q16.16 shift.
     #[must_use]
     pub fn mul_wide(self, rhs: Self) -> Self {
-        let product = i64::from(self.0) * i64::from(rhs.0);
-        Self(clamp_i64_to_i32(product / i64::from(Self::ONE_RAW)))
+        Self(qmul(self.0, rhs.0))
     }
 
     /// Widened divide with the numerator shifted before division.
     #[must_use]
     pub fn div_wide(self, rhs: Self) -> Self {
-        assert_ne!(rhs.0, 0, "fixed-point division by zero");
-        let numerator = i64::from(self.0) * i64::from(Self::ONE_RAW);
-        Self(clamp_i64_to_i32(numerator / i64::from(rhs.0)))
+        Self(qdiv(self.0, rhs.0))
     }
 
     /// Integer square root of a nonnegative Q16.16 value.
     #[must_use]
     pub fn sqrt(self) -> Self {
         assert!(self.0 >= 0, "fixed-point square root of a negative value");
-        let radicand = u128::from(self.0.cast_unsigned()) << Self::FRACTION_BITS;
-        Self(i32::try_from(isqrt(radicand)).unwrap_or(i32::MAX))
+        let radicand = u64::from(self.0.cast_unsigned()) << Self::FRACTION_BITS;
+        Self(i32::try_from(isqrt64(radicand)).expect("Q16.16 square root fits i32"))
     }
 }
 
@@ -103,7 +156,7 @@ impl Add for Fx {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self::Output {
-        Self(self.0.saturating_add(rhs.0))
+        Self(self.0.wrapping_add(rhs.0))
     }
 }
 
@@ -117,7 +170,7 @@ impl Sub for Fx {
     type Output = Self;
 
     fn sub(self, rhs: Self) -> Self::Output {
-        Self(self.0.saturating_sub(rhs.0))
+        Self(self.0.wrapping_sub(rhs.0))
     }
 }
 
@@ -131,7 +184,7 @@ impl Mul for Fx {
     type Output = Self;
 
     fn mul(self, rhs: Self) -> Self::Output {
-        self.mul_wide(rhs)
+        Self(qmul(self.0, rhs.0))
     }
 }
 
@@ -139,7 +192,7 @@ impl Div for Fx {
     type Output = Self;
 
     fn div(self, rhs: Self) -> Self::Output {
-        self.div_wide(rhs)
+        Self(qdiv(self.0, rhs.0))
     }
 }
 
@@ -147,7 +200,7 @@ impl Neg for Fx {
     type Output = Self;
 
     fn neg(self) -> Self::Output {
-        Self(self.0.saturating_neg())
+        Self(self.0.wrapping_neg())
     }
 }
 
@@ -190,22 +243,31 @@ impl Vec3Fx {
         Self::new(value, value, value)
     }
 
-    /// Widened dot product with one final clamp.
+    /// Widened dot product with one final Q16.16 shift.
     #[must_use]
     pub fn dot(self, rhs: Self) -> Fx {
-        let sum = i64::from(self.x.raw()) * i64::from(rhs.x.raw())
-            + i64::from(self.y.raw()) * i64::from(rhs.y.raw())
-            + i64::from(self.z.raw()) * i64::from(rhs.z.raw());
-        Fx::from_raw(clamp_i64_to_i32(sum / i64::from(Fx::ONE_RAW)))
+        let sum = i128::from(mul64(self.x.raw(), rhs.x.raw()))
+            + i128::from(mul64(self.y.raw(), rhs.y.raw()))
+            + i128::from(mul64(self.z.raw(), rhs.z.raw()));
+        Fx::from_raw(renormalize(sum))
     }
 
     /// Cross product.
     #[must_use]
     pub fn cross(self, rhs: Self) -> Self {
         Self::new(
-            self.y * rhs.z - self.z * rhs.y,
-            self.z * rhs.x - self.x * rhs.z,
-            self.x * rhs.y - self.y * rhs.x,
+            Fx::from_raw(renormalize(
+                i128::from(mul64(self.y.raw(), rhs.z.raw()))
+                    - i128::from(mul64(self.z.raw(), rhs.y.raw())),
+            )),
+            Fx::from_raw(renormalize(
+                i128::from(mul64(self.z.raw(), rhs.x.raw()))
+                    - i128::from(mul64(self.x.raw(), rhs.z.raw())),
+            )),
+            Fx::from_raw(renormalize(
+                i128::from(mul64(self.x.raw(), rhs.y.raw()))
+                    - i128::from(mul64(self.y.raw(), rhs.x.raw())),
+            )),
         )
     }
 
@@ -218,29 +280,27 @@ impl Vec3Fx {
     /// Length in Q16.16.
     #[must_use]
     pub fn length(self) -> Fx {
-        self.length_squared().sqrt()
+        let squared = [self.x.raw(), self.y.raw(), self.z.raw()]
+            .into_iter()
+            .map(|component| {
+                u64::try_from(mul64(component, component))
+                    .expect("a squared component is nonnegative")
+            })
+            .sum();
+        Fx::from_raw(i32::try_from(isqrt64(squared)).expect("bounded vector length fits Q16.16"))
     }
 
     /// Unit vector, or zero when the input has no direction.
     #[must_use]
     pub fn normalized(self) -> Self {
-        let sum = i128::from(self.x.raw()) * i128::from(self.x.raw())
-            + i128::from(self.y.raw()) * i128::from(self.y.raw())
-            + i128::from(self.z.raw()) * i128::from(self.z.raw());
-        if sum == 0 {
+        let length = self.length();
+        if length == Fx::ZERO {
             return Self::ZERO;
         }
-        let length = i64::try_from(isqrt(sum.cast_unsigned())).unwrap_or(i64::MAX);
         Self::new(
-            Fx::from_raw(clamp_i64_to_i32(
-                i64::from(self.x.raw()) * i64::from(Fx::ONE_RAW) / length,
-            )),
-            Fx::from_raw(clamp_i64_to_i32(
-                i64::from(self.y.raw()) * i64::from(Fx::ONE_RAW) / length,
-            )),
-            Fx::from_raw(clamp_i64_to_i32(
-                i64::from(self.z.raw()) * i64::from(Fx::ONE_RAW) / length,
-            )),
+            Fx::from_raw(qdiv(self.x.raw(), length.raw())),
+            Fx::from_raw(qdiv(self.y.raw(), length.raw())),
+            Fx::from_raw(qdiv(self.z.raw(), length.raw())),
         )
     }
 
@@ -319,56 +379,12 @@ impl Neg for Vec3Fx {
     }
 }
 
-pub(crate) fn clamp_i64_to_i32(value: i64) -> i32 {
-    if value > i64::from(i32::MAX) {
-        i32::MAX
-    } else if value < i64::from(i32::MIN) {
-        i32::MIN
-    } else {
-        i32::try_from(value).expect("value was bounded to i32 immediately above")
-    }
+fn signed_magnitude(magnitude: u64, negative: bool) -> i32 {
+    let magnitude = i64::try_from(magnitude).expect("fixed-point magnitude fits i64");
+    let value = if negative { -magnitude } else { magnitude };
+    i32::try_from(value).expect("fixed-point result fits i32")
 }
 
-pub(crate) fn isqrt(value: u128) -> u128 {
-    if value < 2 {
-        return value;
-    }
-    let bits = u128::BITS - value.leading_zeros();
-    let mut root = 1u128 << bits.div_ceil(2);
-    loop {
-        let next = u128::midpoint(root, value / root);
-        if next >= root {
-            return root;
-        }
-        root = next;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn normalization_uses_integer_arithmetic() {
-        let value = Vec3Fx::new(Fx::from_i32(3), Fx::from_i32(4), Fx::ZERO).normalized();
-        assert!((value.x.raw() - 3 * Fx::ONE_RAW / 5).abs() <= 1);
-        assert!((value.y.raw() - 4 * Fx::ONE_RAW / 5).abs() <= 1);
-        assert_eq!(value.z, Fx::ZERO);
-    }
-
-    #[test]
-    fn widened_product_saturates_only_after_scaling() {
-        let large = Fx::from_raw(i32::MAX);
-        assert_eq!((large * large).raw(), i32::MAX);
-    }
-
-    #[test]
-    fn integer_newton_sqrt_returns_the_floor_across_boundaries() {
-        for value in 0..10_000u128 {
-            let root = isqrt(value);
-            assert!(root * root <= value);
-            assert!((root + 1) * (root + 1) > value);
-        }
-        assert_eq!(isqrt(u128::MAX), u64::MAX.into());
-    }
+fn renormalize(value: i128) -> i32 {
+    i32::try_from(value / i128::from(Fx::ONE_RAW)).expect("fixed-point result fits i32")
 }
