@@ -50,9 +50,11 @@ One body tick executes the following steps in exactly this order:
 
 1. **Latch 60 Hz match/play input.** Input for tick `T` becomes immutable for the
    tick. Delayed application or mid-tick mutation is nonconforming.
-2. **Resolve graph-v0 assignments and initial oracle intent.** The current cyclic
-   play node resolves triggers, per-ball verb/target entries, squad assignments,
-   enabled coach edges, and the initial deterministic intent.
+2. **Resolve graph-v0 assignments and initial oracle intent.** Each team's cursor
+   scans its current node's ports `0..8` in index order and takes the first true
+   one, at most one transition per team. The node it lands on resolves squad
+   assignments, each ball's `(verb, target, form)` entry from its squad, enabled
+   coach edges, and the initial deterministic intent.
 3. **Build perception.** The deterministic builder produces the full 180° CSR
    observation batch in canonical body order from the current world and resolved
    intent.
@@ -178,6 +180,8 @@ render layer. They are neither canonical words nor match metadata.
 | `V_MAX` | 40 r/s | prov | speed cap; `V_MAX·DT = 0.33 r < r` |
 | `W_MAX` | 40 rad/s | prov | spin cap |
 | `EPS_LEN` | 2⁻⁸ | prov | physics-level direction guard; not a `qnorm` precondition |
+| `POSSESSION_TICKS` | 30 | prov | `Possession` window since the most recent game-ball touch; 0.5 s |
+| `COVER_GAP` | 3 r | prov | `Cover`/`Block`/`Lead` standoff from the target |
 
 A cue preset is `(hit-offset angle θ from center toward the hit normal, azimuth
 frame, J)`. It applies Δv = J·d and
@@ -231,9 +235,18 @@ controller ABI, but these semantics are part of the tick contract:
 - Graph-v0 provides an oracle intent for each embodied body. A body output provides a
   learned steering residual and cue gates. The motor combines both; a zero residual
   preserves oracle behavior.
+- Graph-v0 is one cyclic graph with a cursor per team. A port scan is a fixed eight
+  iterations whatever the node's declared edge count, per determinism rules 2 and 7;
+  ports beyond that count are false. Each cursor's node-entry tick and the most
+  recent game-ball touch are match metadata and replay state.
 - Coaches publish squad mailboxes and enabled-edge logits before same-tick body
-  evaluation. Graph traversal consumes edge logits only through graph-v0's defined
-  edge semantics.
+  evaluation; a team's logits gate only that team's cursor. Graph traversal consumes
+  edge logits only through graph-v0's defined edge semantics: a `CoachEdge` port is
+  evaluated only where `tick mod 4 == 1`, reading the pulse published at `tick − 1`,
+  and is false on every other tick. That delay is not the nonconforming mailbox
+  delay — step 2 resolves before step 4 publishes, so the graph can never see a
+  same-tick logit, and spending each pulse once stops one pulse from driving four
+  transitions.
 - Match/play input is latched at 60 Hz. The final GPU-primary path evaluates
   state-dependent control in resident buffers; it does not read authoritative state
   back to the CPU for control.
@@ -276,7 +289,11 @@ value-level selections and never change accumulation structure.
 8. **Caps.** Clamp velocity magnitude to `V_MAX` and spin magnitude to `W_MAX` through
    `qlen`/`qdiv` rescaling. Values below their cap are unchanged.
 9. **Events.** Evaluate goals, game-ball touches, and pick-query results, then append
-   event records to the event multiset/ring.
+   event records to the event multiset/ring. A game-ball touch record carries body
+   tick `T` and the touching body's team, absent for an arena touch, from which
+   `Possession` derives its relation at step 2. A tick in which bodies from both
+   teams touch the game ball records a neutral touch, never a canonical-index
+   tie-break.
 
 An atomically appended event ring has deterministic contents and nondeterministic
 physical order. Consumers sort the records by the event ABI's canonical key before

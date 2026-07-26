@@ -14,6 +14,8 @@ use zoomieball_core::controller::{
     ActRequest, CheckpointError, CheckpointHeader, ControllerBackend, MotorCommandBatch,
     RewardBatch, decode_header,
 };
+use zoomieball_core::fixed::Fx;
+use zoomieball_core::playbook::PORT_COUNT;
 use zoomieball_core::world::Team;
 use zoomieball_core::{BODY_HZ, COACH_HZ, COACH_INTERVAL_TICKS};
 
@@ -148,12 +150,6 @@ impl ZoomieBackend {
         self.mailboxes[team.index()][squad]
     }
 
-    /// Signed coach logits for the current node's eight ordered edge ports.
-    #[must_use]
-    pub const fn edge_logits(&self, team: Team) -> [i32; 8] {
-        self.edge_logits[team.index()]
-    }
-
     /// The tick a restored backend must execute next — where a resumed driver picks up.
     #[must_use]
     pub const fn next_tick(&self) -> u64 {
@@ -198,6 +194,11 @@ impl ControllerBackend for ZoomieBackend {
         // The driver's tick is authoritative; deriving the resume coordinate from `body_pulses`
         // would assume `act` ran on every tick from zero, which the trait never promises.
         self.next_tick = request.tick + 1;
+    }
+
+    /// The coach lanes are already Q16.16 raw words, so the graph reads them without a rescale.
+    fn edge_logits(&self, team: Team) -> [Fx; PORT_COUNT] {
+        self.edge_logits[team.index()].map(Fx::from_raw)
     }
 
     fn learn(&mut self, tick: u64, rewards: &RewardBatch) {
@@ -382,6 +383,8 @@ mod tests {
         let mut game = Match::new(MatchConfig::default(), playbook(), controller);
         game.tick();
 
+        // Fielder column zero is team zero's local ID 1, and `press` cycles `[0, 1, 2, 3, …]`, so
+        // its mailbox is squad one's.
         let controller = game.controller();
         let mailbox = controller.mailboxes[Team::Zero.index()][1];
         for (lane, value) in mailbox.into_iter().enumerate() {
@@ -390,6 +393,36 @@ mod tests {
                 i32::midpoint(value.clamp(-ONE, ONE), ONE)
             );
         }
+    }
+
+    /// A coach advises one team. Both columns are filled in the same pass from the same
+    /// `ActRequest`, so a shared cursor would show up here as two identical node/edge-mask spans
+    /// even though the two teams are on different nodes.
+    #[test]
+    fn encoding_each_coach_column_reads_its_own_teams_cursor_and_edge_mask() {
+        let controller = ZoomieBackend::new(10, 29);
+        let mut game = Match::new(MatchConfig::default(), playbook(), controller);
+        game.select_play_node(1);
+        game.tick();
+
+        assert_eq!(
+            [game.play_node(Team::Zero), game.play_node(Team::One)],
+            [1, 0],
+            "the fixture must separate the two cursors"
+        );
+        let [player, opponent] = Team::ALL.map(Team::index);
+        let inputs = &game.controller().coaches.inputs;
+        // Lanes 104..112 are one-hot on the node index.
+        assert_eq!([inputs.row(104)[player], inputs.row(105)[player]], [0, ONE]);
+        assert_eq!(
+            [inputs.row(104)[opponent], inputs.row(105)[opponent]],
+            [ONE, 0]
+        );
+        // `recover` declares three ports to `press`'s two, so the masks part at port 2.
+        assert_eq!(
+            [inputs.row(114)[player], inputs.row(114)[opponent]],
+            [ONE, 0]
+        );
     }
 
     /// A goal repositions the objective to the arena centre, so a tick-spanning progress

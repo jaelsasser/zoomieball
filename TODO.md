@@ -82,10 +82,10 @@ These are decision gates, not invitations to install provisional policy.
   - Boundary test: the selected versions build native and WASM targets without introducing a second simulation or controller authority.
   - Completion command: `cargo tree -p bevy-zoomieball && cargo tree -p zoomieball-gpu`.
 
-- [ ] **Acknowledge graph triggers and verb/target shapes.**
+- [x] **Acknowledge graph triggers and verb/target shapes.**
   - Prerequisite: `docs/graph-v0-proposal.md` is checked in with worked trigger, ball-verb, target, and coach-edge examples.
   - Normative anchor: playbook oracle, squad assignment, and edge semantics in `DESIGN.md` and `GAME_TICK.md`.
-  - Boundary test: RON fixtures reject unacknowledged shapes and exercise every accepted trigger, ball verb, target, and coach edge.
+  - Boundary test: every trigger, ball verb, target, form, and coach-edge shape carries a verdict in `docs/graph-v0-proposal.md` and no other document defines one; the RON fixtures that exercise them are the schema bite's boundary in `crates/zoomieball-core/TODO.md`.
   - Completion command: `cargo test -p zoomieball-core playbook`.
 
 - [ ] **Acknowledge the observation encoding frame.**

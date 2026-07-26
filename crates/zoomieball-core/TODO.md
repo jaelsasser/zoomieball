@@ -51,10 +51,10 @@ engine, and compatibility-tier simulation. Local v0 schemas change in place.
   - Boundary test: `append_environment_rays` takes the observer position, wall, ceiling, floor, and goal depths are that observer's surface distances, the floor ray reads `position.z - radius` rather than the constant `FLOOR_RAY_DEPTH`, and the two goal rays carry distinct depths rather than a shared `arena.half_length`.
   - Completion command: `cargo test -p zoomieball-core --test environment_rays`.
 
-- [ ] **M0: extend the single graph-v0 schema in place.**
+- [x] **M0: extend the single graph-v0 schema in place.**
   - Prerequisite: trigger and verb/target shapes are acknowledged in the root roadmap.
-  - Normative anchor: playbook oracle, squad assignment, initial intent, and coach edge semantics in `../../DESIGN.md`.
-  - Boundary test: the existing RON fixture round-trips nodes with triggers, per-ball verb/target tables, assignments, oracle intent, and edges; no alternate schema or migration reader exists.
+  - Normative anchor: playbook oracle, squad assignment, initial intent, and coach edge semantics in `../../DESIGN.md`, over the acknowledged vocabulary in `../../docs/graph-v0-proposal.md`.
+  - Boundary test: the existing RON fixture round-trips nodes with triggers, a squad-indexed `(verb, target, form)` table, squad assignments, oracle intent, and gated coach edges at `PLAYBOOK_ABI_VERSION = 2`; fixtures reject every shape outside the acknowledged vocabulary, including a version-1 file and a retired verb name; `Match` resolves one cursor per team; and no alternate schema or migration reader exists.
   - Completion command: `cargo test -p zoomieball-core playbook`.
 
 - [ ] **M0: bind the learning schedule and physics configuration to replay and checkpoint state.**

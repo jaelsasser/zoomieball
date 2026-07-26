@@ -1,6 +1,7 @@
 //! Public CPU tracer through controller learning and render publication.
 
 use zoomieball_controller::ZoomieBackend;
+use zoomieball_core::world::Team;
 use zoomieball_core::{ControllerBackend, Match, MatchConfig, Playbook};
 use zoomieball_render::{RenderInstance, RenderSnapshot, Renderer, StorageUpload, SurfaceExtent};
 
@@ -40,7 +41,14 @@ fn public_cpu_tracer_reaches_learning_witnesses_and_presentation() {
     }
 
     let witnesses = game.last_hash();
-    assert_eq!(game.play_node(), 1);
+    // The override latches `recover` on the player's team at tick 1, and that node's own
+    // `BallPast(0.0)` port returns it on tick 2 — the ball has not left the halfway line. The
+    // opponent stays on `press` throughout, since an override never reaches it and its
+    // `BallBehind(-8.0)` port reads the same stationary ball.
+    assert_eq!(
+        [game.play_node(Team::Zero), game.play_node(Team::One)],
+        [0, 0]
+    );
     assert_eq!(game.world().tick(), 4);
     assert!(!game.observations().for_body(0).is_empty());
     assert_ne!(witnesses.physics, 0);

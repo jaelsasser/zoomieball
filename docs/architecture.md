@@ -95,4 +95,4 @@ Cosmetic `f32` conversion belongs to `zoomieball-render`, not `zoomieball-core` 
 
 ## Open decisions
 
-Scoring details, final arena values, palette, font, Bevy and wgpu versions, graph trigger representation, and per-ball verb/target shapes remain explicit TODOs. The checked-in playbook is therefore a cyclic graph-v0 tracer rather than a provisional encoding of those unresolved policies. The 10v10 CPU/Canvas2D realtime goal and 100v100 WebGPU target are performance requirements, not alternate update schedules.
+Scoring details, final arena values, palette, font, and Bevy and wgpu versions remain explicit TODOs. Graph triggers and the per-squad verb/target/form shapes are acknowledged in [graph-v0](graph-v0-proposal.md); the checked-in playbook stays a cyclic graph-v0 tracer until the schema bite encodes them, and it is not a provisional encoding of any unresolved policy. The 10v10 CPU/Canvas2D realtime goal and 100v100 WebGPU target are performance requirements, not alternate update schedules.

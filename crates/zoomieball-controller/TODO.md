@@ -12,7 +12,7 @@ and serial oracle for GPU bring-up.
 - [ ] **M0: conform fielder, goalie, and coach encodings without bypassing the batch API.**
   - Prerequisite: core perception lanes, squad assignments, rewards, and typed requests are stable.
   - Normative anchor: population topology and mailbox/cue contracts in `../../DESIGN.md` and `../../docs/controller-abi.md`.
-  - Boundary test: fovea, lane-layout, cue-charge, squad mailbox, and edge-logit fixtures pass for all three population families.
+  - Boundary test: fovea, lane-layout, cue-charge, squad mailbox, and edge-logit fixtures pass for all three population families, and the coach's node and edge-mask lanes read `ActRequest`'s per-team cursor and enabled-edge mask rather than one pair shared across both team columns.
   - Completion command: `cargo test -p zoomieball-controller encoding`.
 
 - [ ] **M0: settle the observation encoding frame across all three populations.**
@@ -26,7 +26,7 @@ and serial oracle for GPU bring-up.
   - Normative anchor: v0 persistence and sibling-wire-format constraints in `../../docs/controller-abi.md`.
   - Boundary test: current checkpoints reject mismatched timing/topology cleanly, round-trip learning state and mailboxes, and no migration reader is introduced.
   - Completion command: `cargo test -p zoomieball-controller checkpoint`.
-  - Progress: the population payload now rides `zoomie-wire`'s length-prefixed `ZNETLIVE` pack, which carries the specs, configs, rules, manifests, and resume cursor and validates the recomputed capability manifest on decode; only the graph-v0 topology identifiers in the local header remain, and they are still unacknowledged.
+  - Progress: the population payload now rides `zoomie-wire`'s length-prefixed `ZNETLIVE` pack, which carries the specs, configs, rules, manifests, and resume cursor and validates the recomputed capability manifest on decode; only the graph-v0 topology identifiers in the local header remain, and `../../docs/graph-v0-proposal.md` now names them: a cursor per team, each cursor's node-entry tick, and the most recent game-ball touch's tick and touching team.
 
 - [x] **M0: expose controller and learning checksums independently over their complete word sets.**
   - Prerequisite: population stepping and scheduled learning conform to sibling Zoomie's serial semantics, and the backend folds sibling `Population::<SparseCtrnn>::inference_pair` and `learning_pair` rather than `checksum_pair`, which reaches the state row alone.

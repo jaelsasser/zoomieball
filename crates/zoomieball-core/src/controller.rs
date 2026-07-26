@@ -4,7 +4,7 @@ use std::fmt;
 
 use crate::fixed::{Fx, Vec3Fx};
 use crate::perception::ObservationBatch;
-use crate::playbook::OracleIntentBatch;
+use crate::playbook::{OracleIntentBatch, PORT_COUNT};
 use crate::world::{Team, WorldView};
 use crate::{LANE_ABI_VERSION, PHYSICS_ABI_VERSION, REWARD_ABI_VERSION, SCHEDULE_ABI_VERSION};
 
@@ -87,10 +87,10 @@ pub struct ActRequest<'a> {
     pub observations: &'a ObservationBatch,
     /// Naive play solver intents.
     pub intents: &'a OracleIntentBatch,
-    /// Current play-node index.
-    pub play_node: usize,
-    /// Low eight enabled outgoing graph ports.
-    pub enabled_edges: u8,
+    /// Each team's current play-node index, indexed by `Team::index`.
+    pub play_node: [usize; 2],
+    /// Each team's low eight enabled outgoing graph ports, indexed by `Team::index`.
+    pub enabled_edges: [u8; 2],
     /// Whether coaches must publish mailboxes before body evaluation.
     pub coach_due: bool,
 }
@@ -165,6 +165,13 @@ pub trait ControllerBackend {
     /// Apply accumulated deterministic rewards after physics.
     fn learn(&mut self, tick: u64, rewards: &RewardBatch);
 
+    /// One team's coach logits for its node's eight ordered ports, as the last pulse published them.
+    ///
+    /// Graph traversal reads this at tick-order step 2, before `act` publishes anything, so a
+    /// `CoachEdge` port is one tick behind its pulse by construction rather than by choice. A
+    /// backend with no coach population has no opinion and returns zeros.
+    fn edge_logits(&self, team: Team) -> [Fx; PORT_COUNT];
+
     /// Write a complete versioned checkpoint, reusing `output` capacity.
     fn checkpoint(&self, output: &mut Vec<u8>);
 
@@ -200,6 +207,10 @@ impl ControllerBackend for IdleController {
     }
 
     fn learn(&mut self, _tick: u64, _rewards: &RewardBatch) {}
+
+    fn edge_logits(&self, _team: Team) -> [Fx; PORT_COUNT] {
+        [Fx::ZERO; PORT_COUNT]
+    }
 
     fn checkpoint(&self, output: &mut Vec<u8>) {
         output.clear();

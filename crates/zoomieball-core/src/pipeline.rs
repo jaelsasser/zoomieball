@@ -5,9 +5,9 @@ use crate::controller::{
 };
 use crate::hash::{OFFSET_BASIS, fold_u64};
 use crate::perception::{ObservationBatch, SpatialIndex};
-use crate::physics::{PhysicsConfig, step as physics_step};
-use crate::playbook::{OracleIntentBatch, Playbook};
-use crate::world::World;
+use crate::physics::{BallTouch, PhysicsConfig, step as physics_step};
+use crate::playbook::{GraphState, OracleIntentBatch, PlayNode, Playbook, next_cursor};
+use crate::world::{Team, World};
 use crate::{
     COACH_INTERVAL_TICKS, LANE_ABI_VERSION, PHYSICS_ABI_VERSION, REPLAY_ABI_VERSION,
     REWARD_ABI_VERSION, SCHEDULE_ABI_VERSION,
@@ -43,7 +43,7 @@ pub struct TickHash {
     pub controller: u64,
     /// Learning eligibility and rule-state witness.
     pub learning: u64,
-    /// Diagnostic whole-pipeline fold, including match metadata and the play node.
+    /// Diagnostic whole-pipeline fold, including match metadata and both teams' play nodes.
     pub pipeline: u64,
 }
 
@@ -53,7 +53,8 @@ pub struct Match<B: ControllerBackend> {
     world: World,
     controller: B,
     playbook: Playbook,
-    play_node: usize,
+    cursors: [usize; 2],
+    graph_state: GraphState,
     pending_play_node: Option<usize>,
     physics: PhysicsConfig,
     learning_interval: u32,
@@ -79,7 +80,8 @@ impl<B: ControllerBackend> Match<B> {
             world,
             controller,
             playbook,
-            play_node: 0,
+            cursors: [0; 2],
+            graph_state: GraphState::default(),
             pending_play_node: None,
             physics: config.physics,
             learning_interval: config.learning_interval,
@@ -94,11 +96,36 @@ impl<B: ControllerBackend> Match<B> {
 
     /// Advance one complete 60 Hz body tick through the current CPU tracer.
     pub fn tick(&mut self) -> TickHash {
-        if let Some(node) = self.pending_play_node.take() {
-            self.play_node = node;
+        let tick = self.world.tick;
+
+        // Step 2. Each cursor scans its own node against its own team's logits. A latched human
+        // override outranks the scan for the player's team: the scan is skipped outright, not run
+        // and overwritten, because a fired port would restamp the node-entry tick even when the
+        // override holds the cursor exactly where it already is — a spurious `Elapsed` reset.
+        let overridden = self.pending_play_node.take();
+        for team in Team::ALL {
+            let node = overridden
+                .filter(|_| team == Team::Zero)
+                .unwrap_or_else(|| {
+                    let cursor = self.cursors[team.index()];
+                    next_cursor(
+                        &self.playbook.nodes()[cursor],
+                        cursor,
+                        team,
+                        &self.graph_state,
+                        &self.world,
+                        self.controller.edge_logits(team),
+                    )
+                });
+            self.enter(team, node);
         }
-        self.playbook
-            .resolve(self.play_node, &mut self.world, &mut self.intents);
+        self.playbook.resolve(
+            self.cursors,
+            &self.physics.arena,
+            &mut self.world,
+            &mut self.intents,
+        );
+
         self.spatial.rebuild(self.world.view());
         self.observations.build(
             self.world.view(),
@@ -106,19 +133,16 @@ impl<B: ControllerBackend> Match<B> {
             &self.physics.arena,
             &self.spatial,
         );
-        let tick = self.world.tick;
         self.controller.act(
             ActRequest {
                 tick,
                 world: self.world.view(),
                 observations: &self.observations,
                 intents: &self.intents,
-                play_node: self.play_node,
-                enabled_edges: if self.playbook.nodes()[self.play_node].edges().len() == 8 {
-                    u8::MAX
-                } else {
-                    (1u8 << self.playbook.nodes()[self.play_node].edges().len()) - 1
-                },
+                play_node: self.cursors,
+                enabled_edges: self
+                    .cursors
+                    .map(|cursor| enabled_edges(&self.playbook.nodes()[cursor])),
                 coach_due: tick.is_multiple_of(u64::from(COACH_INTERVAL_TICKS)),
             },
             &mut self.commands,
@@ -136,6 +160,18 @@ impl<B: ControllerBackend> Match<B> {
             events.objective_progress,
             events.scorer,
         );
+        // Substep stage 9 reports who touched the game ball; the tick it happened on is this
+        // driver's to stamp, and the pair is what `Possession` reads at the next step 2. A
+        // contested touch is honestly nobody's and lands as `None`, which `possession` already
+        // reads as `Neutral` — the same word an empty window gets — overwriting any standing
+        // single-team touch.
+        if let Some(touch) = events.ball_touch {
+            self.graph_state.touched = tick;
+            self.graph_state.toucher = match touch {
+                BallTouch::Team(team) => Some(team),
+                BallTouch::Contested => None,
+            };
+        }
 
         self.world.tick += 1;
         if self
@@ -174,26 +210,46 @@ impl<B: ControllerBackend> Match<B> {
         &mut self.controller
     }
 
-    /// Current human-authoritative play node.
+    /// One team's current play node.
     #[must_use]
-    pub const fn play_node(&self) -> usize {
-        self.play_node
+    pub const fn play_node(&self, team: Team) -> usize {
+        self.cursors[team.index()]
     }
 
-    /// Queue a valid play node to latch at the start of the next body tick.
+    /// Current graph traversal and possession state, which is per-match replay state.
+    #[must_use]
+    pub const fn graph_state(&self) -> GraphState {
+        self.graph_state
+    }
+
+    /// Queue a valid play node to latch on the player's team at the start of the next body tick.
     pub fn select_play_node(&mut self, node: usize) {
         assert!(node < self.playbook.nodes().len(), "play node out of range");
         self.pending_play_node = Some(node);
     }
 
-    /// Queue one outgoing port from the latest queued or active node.
+    /// Queue one outgoing port on the player's team, from its latest queued or active node.
     pub fn traverse_play(&mut self, port: usize) -> bool {
-        let source = self.pending_play_node.unwrap_or(self.play_node);
+        let source = self
+            .pending_play_node
+            .unwrap_or(self.cursors[Team::Zero.index()]);
         let Some(next) = self.playbook.traverse(source, port) else {
             return false;
         };
         self.pending_play_node = Some(next);
         true
+    }
+
+    /// Move one cursor, restarting the node-entry clock only where the node actually changed.
+    ///
+    /// A node's last port is `Always` back to some node, frequently itself; treating that as a
+    /// fresh entry would reset `entered` every tick and strand every `Elapsed` port behind it.
+    fn enter(&mut self, team: Team, node: usize) {
+        if self.cursors[team.index()] == node {
+            return;
+        }
+        self.cursors[team.index()] = node;
+        self.graph_state.entered[team.index()] = self.world.tick;
     }
 
     /// Current observations, useful for the first-person inspector.
@@ -213,13 +269,17 @@ impl<B: ControllerBackend> Match<B> {
         let world = self.world.diagnostic_hash();
         let controller = self.controller.controller_hash();
         let learning = self.controller.learning_hash();
+        let [player_cursor, opponent_cursor] = self
+            .cursors
+            .map(|cursor| u64::try_from(cursor).expect("play node fits u64"));
         let pipeline = [
             u64::from(REPLAY_ABI_VERSION),
             u64::from(LANE_ABI_VERSION),
             u64::from(PHYSICS_ABI_VERSION),
             u64::from(REWARD_ABI_VERSION),
             u64::from(SCHEDULE_ABI_VERSION),
-            u64::try_from(self.play_node).expect("play node fits u64"),
+            player_cursor,
+            opponent_cursor,
             u64::from(physics),
             world,
             controller,
@@ -236,15 +296,24 @@ impl<B: ControllerBackend> Match<B> {
     }
 }
 
+/// One low bit per declared outgoing port; the compiler caps a node at eight, which saturates.
+fn enabled_edges(node: &PlayNode) -> u8 {
+    u8::try_from((1u16 << node.edges().len()) - 1).expect("a node declares at most eight ports")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::controller::{CheckpointError, IdleController, MotorCommand};
-    use crate::fixed::Vec3Fx;
+    use crate::fixed::{Fx, Vec3Fx};
+    use crate::playbook::PORT_COUNT;
+    use crate::world::LocalId;
     use crate::{BODY_HZ, COACH_HZ, PHYSICS_HZ};
 
+    const SHIPPED: &str = include_str!("../../../assets/default-playbook.ron");
+
     fn playbook() -> Playbook {
-        Playbook::compile_ron(include_str!("../../../assets/default-playbook.ron")).unwrap()
+        Playbook::compile_ron(SHIPPED).unwrap()
     }
 
     #[derive(Debug, Clone)]
@@ -253,6 +322,10 @@ mod tests {
         acts: u64,
         coaches: u64,
         learns: u64,
+        /// Each team's enabled-edge mask as the last `act` received it.
+        masks: [u8; 2],
+        /// Standing coach publication, so a fixture can gate one team's ports without a pool.
+        logits: [[Fx; PORT_COUNT]; 2],
     }
 
     impl TracerController {
@@ -262,6 +335,8 @@ mod tests {
                 acts: 0,
                 coaches: 0,
                 learns: 0,
+                masks: [0; 2],
+                logits: [[Fx::ZERO; PORT_COUNT]; 2],
             }
         }
     }
@@ -270,6 +345,7 @@ mod tests {
         fn act(&mut self, request: ActRequest<'_>, commands: &mut MotorCommandBatch) {
             self.acts += 1;
             self.coaches += u64::from(request.coach_due);
+            self.masks = request.enabled_edges;
             commands.clear();
             for (body, team) in request.world.teams.iter().enumerate() {
                 if team.is_some() {
@@ -284,6 +360,10 @@ mod tests {
 
         fn learn(&mut self, _tick: u64, _rewards: &RewardBatch) {
             self.learns += 1;
+        }
+
+        fn edge_logits(&self, team: Team) -> [Fx; PORT_COUNT] {
+            self.logits[team.index()]
         }
 
         fn checkpoint(&self, output: &mut Vec<u8>) {
@@ -320,17 +400,216 @@ mod tests {
         assert_eq!(a.controller().learns, 2);
     }
 
+    /// The mask is one low bit per *declared* port, per team, from that team's own node — never a
+    /// fixed eight. `press` declares two ports and `recover` three, so moving only the player's
+    /// team onto `recover` parts the two masks.
     #[test]
-    fn cyclic_human_traversal_changes_and_returns_to_the_play_node() {
+    fn enabled_edges_carry_each_nodes_declared_port_count_per_team() {
+        let mut game = Match::new(
+            MatchConfig::default(),
+            playbook(),
+            TracerController::new(10),
+        );
+        game.tick();
+        assert_eq!(game.controller().masks, [0b11, 0b11]);
+
+        game.select_play_node(1);
+        game.tick();
+        assert_eq!(game.controller().masks, [0b111, 0b11]);
+    }
+
+    /// Both cursors start on `press` and scan the same ports against the same world, so team one
+    /// standing still while team zero moves is the override — and nothing else — being read.
+    #[test]
+    fn cyclic_human_traversal_drives_the_players_team_alone() {
         let mut game = Match::new(MatchConfig::default(), playbook(), IdleController::new(10));
         assert!(game.traverse_play(0));
-        assert_eq!(game.play_node(), 0);
+        assert_eq!(
+            game.play_node(Team::Zero),
+            0,
+            "an override latches, it does not apply early"
+        );
         game.tick();
-        assert_eq!(game.play_node(), 1);
+        assert_eq!(
+            [game.play_node(Team::Zero), game.play_node(Team::One)],
+            [1, 0]
+        );
         assert!(game.traverse_play(0));
-        assert_eq!(game.play_node(), 1);
+        assert_eq!(game.play_node(Team::Zero), 1);
         game.tick();
-        assert_eq!(game.play_node(), 0);
+        assert_eq!(
+            [game.play_node(Team::Zero), game.play_node(Team::One)],
+            [0, 0]
+        );
+    }
+
+    /// Verdict 1: a team's coach logits gate only that team's transitions. Both cursors sit on the
+    /// same node with the same `CoachEdge` port, and only the team whose lane cleared the gate
+    /// leaves — on the tick after the pulse, not the pulse's own tick.
+    #[test]
+    fn a_coach_edge_moves_only_the_team_whose_logit_cleared_the_gate() {
+        let source = SHIPPED.replacen(
+            "(to: 1, trigger: BallBehind(-8.0))",
+            "(to: 1, trigger: CoachEdge)",
+            1,
+        );
+        let mut controller = TracerController::new(10);
+        controller.logits[Team::Zero.index()][0] = Fx::ONE;
+        let mut game = Match::new(
+            MatchConfig::default(),
+            Playbook::compile_ron(&source).unwrap(),
+            controller,
+        );
+
+        game.tick();
+        assert_eq!(
+            [game.play_node(Team::Zero), game.play_node(Team::One)],
+            [0, 0],
+            "tick zero is the coach's own pulse, where its logits are not yet readable"
+        );
+        game.tick();
+        assert_eq!(
+            [game.play_node(Team::Zero), game.play_node(Team::One)],
+            [1, 0]
+        );
+    }
+
+    /// The three owners of one `Possession` decision meet here: physics names the touching team,
+    /// this driver stamps the tick, and the next tick's port scan reads the pair back.
+    #[test]
+    fn a_game_ball_touch_latches_possession_for_the_touching_team_alone() {
+        let source = SHIPPED.replacen(
+            "(to: 1, trigger: BallBehind(-8.0))",
+            "(to: 1, trigger: Possession(Teammate))",
+            1,
+        );
+        let mut game = Match::new(
+            MatchConfig::default(),
+            Playbook::compile_ron(&source).unwrap(),
+            IdleController::new(10),
+        );
+        let objective = game.world().objective_index();
+        let toucher = game
+            .world()
+            .player_index(Team::Zero, LocalId::new(1).unwrap())
+            .unwrap();
+        let contact = game.world().view().positions[toucher];
+        game.world_mut().set_position(objective, contact);
+
+        game.tick();
+        assert_eq!(game.graph_state().toucher, Some(Team::Zero));
+        assert_eq!(game.graph_state().touched, 0);
+        assert_eq!(
+            [game.play_node(Team::Zero), game.play_node(Team::One)],
+            [0, 0],
+            "the touch happens in this tick's physics, after this tick's port scan"
+        );
+
+        game.tick();
+        assert_eq!(
+            [game.play_node(Team::Zero), game.play_node(Team::One)],
+            [1, 0]
+        );
+    }
+
+    /// A tick in which both teams touch the game ball is honestly nobody's: the record lands as
+    /// the neutral relation, overwriting a standing possession. Under the canonical-index
+    /// tie-break the proposal rejects, team zero would keep the ball here instead.
+    #[test]
+    fn a_contested_touch_overwrites_possession_with_neutral() {
+        let mut game = Match::new(MatchConfig::default(), playbook(), IdleController::new(10));
+        let objective = game.world().objective_index();
+        let zero = game
+            .world()
+            .player_index(Team::Zero, LocalId::new(1).unwrap())
+            .unwrap();
+        let one = game
+            .world()
+            .player_index(Team::One, LocalId::new(1).unwrap())
+            .unwrap();
+
+        let contact = game.world().view().positions[zero];
+        game.world_mut().set_position(objective, contact);
+        game.tick();
+        assert_eq!(game.graph_state().toucher, Some(Team::Zero));
+
+        let contact = game.world().view().positions[zero];
+        game.world_mut().set_position(one, contact);
+        game.world_mut().set_position(objective, contact);
+        game.tick();
+        assert_eq!(game.graph_state().toucher, None);
+        assert_eq!(game.graph_state().touched, 1);
+    }
+
+    /// A node whose last port is `Always` back to itself is scanned as true every tick. Were that
+    /// counted as entering the node, the `Elapsed` port ahead of it could never come due — which is
+    /// exactly the stall `recover`'s three-second escape hatch exists to prevent.
+    #[test]
+    fn holding_a_node_through_its_own_always_port_does_not_restart_the_elapsed_clock() {
+        let source = SHIPPED
+            .replacen(
+                "(to: 0, trigger: BallPast(0.0))",
+                "(to: 0, trigger: BallPast(100.0))",
+                1,
+            )
+            .replacen(
+                "(to: 0, trigger: Elapsed(180))",
+                "(to: 0, trigger: Elapsed(3))",
+                1,
+            );
+        let mut game = Match::new(
+            MatchConfig::default(),
+            Playbook::compile_ron(&source).unwrap(),
+            IdleController::new(10),
+        );
+
+        game.select_play_node(1);
+        game.tick();
+        assert_eq!(game.graph_state().entered[Team::Zero.index()], 0);
+        for _ in 0..2 {
+            game.tick();
+        }
+        assert_eq!(
+            game.play_node(Team::Zero),
+            1,
+            "two ticks short of the operand, the cursor holds"
+        );
+
+        game.tick();
+        assert_eq!(game.play_node(Team::Zero), 0);
+        assert_eq!(
+            game.play_node(Team::One),
+            0,
+            "the opponent never left `press`"
+        );
+    }
+
+    /// An override outranks trigger evaluation rather than replacing its result. `recover`'s
+    /// `BallPast(0.0)` port fires every tick against a ball resting on the halfway line, so
+    /// re-selecting the node the cursor already holds is the case that separates the two: skipping
+    /// the scan leaves the node-entry tick alone, while running it and overwriting the answer
+    /// walks the cursor off the node and back, restamping `entered` and stranding every `Elapsed`
+    /// port behind it.
+    #[test]
+    fn an_override_outranks_the_port_scan_rather_than_overwriting_its_result() {
+        let mut game = Match::new(MatchConfig::default(), playbook(), IdleController::new(10));
+        game.select_play_node(1);
+        game.tick();
+        assert_eq!(game.play_node(Team::Zero), 1);
+        assert_eq!(game.graph_state().entered[Team::Zero.index()], 0);
+
+        game.select_play_node(1);
+        game.tick();
+        assert_eq!(
+            game.play_node(Team::Zero),
+            1,
+            "the override holds the cursor where it already is"
+        );
+        assert_eq!(
+            game.graph_state().entered[Team::Zero.index()],
+            0,
+            "a scan that never ran cannot restamp the node-entry tick"
+        );
     }
 
     #[test]

@@ -98,13 +98,12 @@ fn encode_coach_column(
     for (lane, value) in threat.into_iter().enumerate() {
         write_signed(inputs, 96 + lane, column, clamp_i64(value).clamp(-ONE, ONE));
     }
-    inputs.row_mut(104 + request.play_node % 8)[column] = ONE;
+    // A coach advises its own team's cursor, so its node and edge-mask lanes are that team's,
+    // never the pair's: the two cursors move independently under graph-v0's per-team traversal.
+    inputs.row_mut(104 + request.play_node[team.index()] % 8)[column] = ONE;
+    let enabled = request.enabled_edges[team.index()];
     for lane in 0..8 {
-        inputs.row_mut(112 + lane)[column] = if request.enabled_edges & (1 << lane) == 0 {
-            0
-        } else {
-            ONE
-        };
+        inputs.row_mut(112 + lane)[column] = if enabled & (1 << lane) == 0 { 0 } else { ONE };
     }
     write_signed(inputs, 120, column, team_rewards[team.index()][0]);
     write_signed(inputs, 121, column, team_rewards[team.index()][1]);

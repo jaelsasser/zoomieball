@@ -161,11 +161,13 @@ edge semantics.
 
 ### Playbook and motor combination
 
-There is one cyclic graph-v0 schema, not a prototype and production pair. Each node
-will be extended in place to hold triggers, per-ball verb/target tables, squad
-assignments, oracle intent, and coach edge semantics. RON is the at-rest form and
-flat tables are the execution form. Fixture plays use the same schema that the later
-editor writes. No migration reader is required for Zoomieball-local v0 artifacts.
+There is one cyclic graph-v0 schema, not a prototype and production pair. One graph
+carries a cursor per team: a team's coach logits gate only that team's transitions,
+and human overrides drive the player's team. Each node holds triggers, a
+`(verb, target, form)` table indexed by squad, squad assignments, oracle intent, and
+coach edge semantics. RON is the at-rest form and flat tables are the execution form.
+Fixture plays use the same schema that the later editor writes. No migration reader
+is required for Zoomieball-local v0 artifacts.
 
 At the start of a body tick, graph-v0 resolves assignments and initial oracle intent.
 Body networks receive that intent with perception and the current squad mailbox.
@@ -175,8 +177,10 @@ the motor decoder combines that fresh oracle value with the latched learned outp
 The learned term is therefore not recomputed at physics frequency, and the oracle is
 not held stale for both substeps.
 
-Trigger vocabulary and per-verb parameter shapes are still open. Checked-in plays
-beyond fixtures remain blocked until those shapes are acknowledged.
+The vocabulary is acknowledged and closed: eight triggers, eleven verbs, seven targets,
+and four forms. No verb emits a cue gate, so the oracle/residual split survives the
+extension. [graph-v0-proposal.md](docs/graph-v0-proposal.md) is that vocabulary's
+home.
 
 ### Rewards, learning, checkpoints, and inspection
 
@@ -344,7 +348,7 @@ The witness layers are:
 | M2a — GPU physics shadow | WGSL fixed helpers and physics stages; CPU-produced commands; per-step physics parity; first-divergence and stage bisection |
 | M2b — GPU Zoomie | Generic sibling GPU schedules bit-identical to Zoomie's serial oracle; Zoomieball integration; controller and learning parity; shadow removal only after all witnesses pass |
 | M3 — rendering | Raw renderer, GPU-resident source, hard-light arena, Bevy wrapper, free camera, contours, and perception inspector |
-| M4 — playbook | GPU graph-v0 evaluation and checked-in plays after trigger and verb shapes are acknowledged |
+| M4 — playbook | GPU graph-v0 evaluation and checked-in plays beyond fixtures |
 | M5a — Canvas2D application | Application shell over the CPU tier alone: DOM HUD, import/export, and tier selection that resolves to Canvas2D |
 | M5b — WebGPU application | WebGPU primary path and device profiling inside the M5a shell |
 
@@ -391,7 +395,6 @@ way the playbook's legibility reaches real players before M4.
 - Final palette tokens and shipped typeface.
 - Bevy/wgpu version pins and publication policy; scaffolding chooses neither.
 - Software-adapter and no-WebGPU user messaging.
-- Graph-v0 trigger vocabulary, per-ball verb parameter shapes, formation definitions,
-  and the exact set of checked-in plays.
+- The exact set of checked-in plays beyond fixtures.
 - Whether a rust-gpu-to-naga single-source spike is viable. Hand port plus parity
   remains the critical-path plan.

@@ -447,7 +447,7 @@ mod tests {
         let rewards = RewardBatch::with_len(bodies);
         let mut backend = ZoomieBackend::new(10, 71);
 
-        playbook.resolve(0, &mut world, &mut intents);
+        playbook.resolve([0; 2], &physics.arena, &mut world, &mut intents);
         spatial.rebuild(world.view());
         observations.build(world.view(), &intents, &physics.arena, &spatial);
         let request = ActRequest {
@@ -455,8 +455,8 @@ mod tests {
             world: world.view(),
             observations: &observations,
             intents: &intents,
-            play_node: 0,
-            enabled_edges: 1,
+            play_node: [0; 2],
+            enabled_edges: [0b11; 2],
             coach_due: true,
         };
 

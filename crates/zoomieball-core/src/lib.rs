@@ -19,7 +19,9 @@ pub use fixed::{Fx, Vec3Fx};
 pub use perception::{ObservationBatch, RayObservation, SemanticTag, SpatialIndex};
 pub use physics::{Arena, PHYSICS_DT, PhysicsConfig};
 pub use pipeline::{Match, MatchConfig, TickHash};
-pub use playbook::{OracleIntent, OracleIntentBatch, PlayNode, Playbook, PlaybookError};
+pub use playbook::{
+    GraphState, OracleIntent, OracleIntentBatch, PORT_COUNT, PlayNode, Playbook, PlaybookError,
+};
 pub use world::{ActionCharges, BodyId, ContactFrame, LocalId, Role, Team, World, WorldView};
 
 /// Perception and embodied-controller pulses per second.

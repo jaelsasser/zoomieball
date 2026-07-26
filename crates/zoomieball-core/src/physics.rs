@@ -93,6 +93,19 @@ impl Default for PhysicsConfig {
     }
 }
 
+/// Which side touched the game ball during one tick's pair stages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BallTouch {
+    /// Exactly one team's bodies touched the ball.
+    Team(Team),
+    /// Bodies from both teams touched the ball, which is honestly nobody's possession.
+    ///
+    /// The graph-v0 proposal's Triggers section rejects the tempting alternative — a
+    /// canonical-index tie-break — as structurally biased: team zero owns the low indices
+    /// and would win every contested touch in the match.
+    Contested,
+}
+
 /// Sparse physics events from one authoritative tick.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PhysicsEvents {
@@ -100,6 +113,13 @@ pub struct PhysicsEvents {
     pub scorer: Option<Team>,
     /// Signed objective travel along X, summed per substep over continuous motion only.
     pub objective_progress: Fx,
+    /// Who touched the game ball during this step, if anyone.
+    ///
+    /// Populated from the pair stage only: a player/ball contact yields `Some`, and
+    /// `None` covers both no observed touch and an untouched-by-a-player arena contact.
+    /// The caller pairs this with the tick to maintain the `Possession` trigger's replay
+    /// state (`GAME_TICK.md` substep stage 9); physics.rs does not stamp a tick itself.
+    pub ball_touch: Option<BallTouch>,
 }
 
 /// One goal resolved within a substep.
@@ -120,18 +140,25 @@ pub fn step(
     assert_eq!(world.ids.len(), commands.commands.len());
     let objective = world.objective_index();
     let mut events = PhysicsEvents::default();
+    let mut touched = [false; 2];
     for _ in 0..PHYSICS_SUBSTEPS {
         let entry_x = world.positions[objective].x;
         apply_actuators(world, intents, commands, config);
         integrate(world, config);
         for _ in 0..config.collision_iterations {
-            collide_spheres(world, config.restitution);
+            collide_spheres(world, config.restitution, objective, &mut touched);
         }
         let goal = resolve_arena(world, config);
         let reposition_x = goal.map_or(Fx::ZERO, |goal| goal.reposition_x);
         events.objective_progress += world.positions[objective].x - entry_x - reposition_x;
         events.scorer = events.scorer.or(goal.map(|goal| goal.team));
     }
+    events.ball_touch = match touched {
+        [false, false] => None,
+        [true, false] => Some(BallTouch::Team(Team::Zero)),
+        [false, true] => Some(BallTouch::Team(Team::One)),
+        [true, true] => Some(BallTouch::Contested),
+    };
     events
 }
 
@@ -299,7 +326,13 @@ fn resolve_body_arena(world: &mut World, body: usize, config: &PhysicsConfig) {
     world.charges[body] = ActionCharges::default();
 }
 
-fn collide_spheres(world: &mut World, restitution: Fx) {
+/// Resolve overlapping pairs and accumulate which teams touched the game ball.
+///
+/// `touched` flags each team seen touching `objective` across every call this step (both
+/// substeps, every collision iteration): a pure set union over the touching pairs, so the
+/// result is the same however that set is built up, per determinism rule 6's ban on
+/// order-dependent consumption of an unordered contact set.
+fn collide_spheres(world: &mut World, restitution: Fx, objective: usize, touched: &mut [bool; 2]) {
     for first in 0..world.ids.len() {
         for second in first + 1..world.ids.len() {
             let offset = world.positions[second] - world.positions[first];
@@ -307,6 +340,11 @@ fn collide_spheres(world: &mut World, restitution: Fx) {
             let minimum = world.radii[first] + world.radii[second];
             if distance >= minimum {
                 continue;
+            }
+            if first == objective || second == objective {
+                let player = if first == objective { second } else { first };
+                let team = world.teams[player].expect("ball touchers are players");
+                touched[team.index()] = true;
             }
             let normal = if distance == Fx::ZERO {
                 Vec3Fx::X
@@ -467,16 +505,30 @@ mod tests {
     #[test]
     fn canonical_collision_sweeps_are_replay_stable() {
         let mut first = World::new(10);
+        let objective = first.objective_index();
         first.positions[0] = Vec3Fx::new(Fx::ZERO, Fx::ZERO, Fx::ONE);
         first.positions[1] = Vec3Fx::new(Fx::HALF, Fx::ZERO, Fx::ONE);
         first.velocities[0] = Vec3Fx::X;
         first.velocities[1] = -Vec3Fx::X;
         let mut second = first.clone();
+        let mut first_touched = [false; 2];
+        let mut second_touched = [false; 2];
         for _ in 0..PhysicsConfig::default().collision_iterations {
-            collide_spheres(&mut first, PhysicsConfig::default().restitution);
-            collide_spheres(&mut second, PhysicsConfig::default().restitution);
+            collide_spheres(
+                &mut first,
+                PhysicsConfig::default().restitution,
+                objective,
+                &mut first_touched,
+            );
+            collide_spheres(
+                &mut second,
+                PhysicsConfig::default().restitution,
+                objective,
+                &mut second_touched,
+            );
         }
         assert_eq!(first, second);
+        assert_eq!(first_touched, second_touched);
         assert!(first.positions[0].x < first.positions[1].x);
     }
 
@@ -505,5 +557,42 @@ mod tests {
         let commands = MotorCommandBatch::with_len(world.ids.len());
         step(&mut world, &intents, &commands, &PhysicsConfig::default());
         assert!(world.spins[0].x > Fx::ONE);
+    }
+
+    #[test]
+    fn game_ball_touch_is_none_without_a_player_contact() {
+        let mut world = World::new(10);
+        let intents = still_intents(&world);
+        let commands = MotorCommandBatch::with_len(world.ids.len());
+        let events = step(&mut world, &intents, &commands, &PhysicsConfig::default());
+        assert_eq!(events.ball_touch, None);
+    }
+
+    #[test]
+    fn game_ball_touch_records_the_touching_players_team() {
+        let mut world = World::new(10);
+        let objective = world.objective_index();
+        world.positions[3] = world.positions[objective];
+        let intents = still_intents(&world);
+        let commands = MotorCommandBatch::with_len(world.ids.len());
+        let events = step(&mut world, &intents, &commands, &PhysicsConfig::default());
+        assert_eq!(events.ball_touch, Some(BallTouch::Team(Team::Zero)));
+    }
+
+    /// The proposal's Triggers section: a step in which bodies from both teams touch the
+    /// game ball records a neutral touch. A canonical-index tie-break would hand team zero
+    /// (`lower` here) every contested touch in the match, which is the rejected alternative.
+    #[test]
+    fn a_game_ball_touch_by_both_teams_in_one_step_is_contested() {
+        let mut world = World::new(10);
+        let objective = world.objective_index();
+        let lower = 3;
+        let higher = world.active_per_team() + 2;
+        world.positions[lower] = world.positions[objective];
+        world.positions[higher] = world.positions[objective];
+        let intents = still_intents(&world);
+        let commands = MotorCommandBatch::with_len(world.ids.len());
+        let events = step(&mut world, &intents, &commands, &PhysicsConfig::default());
+        assert_eq!(events.ball_touch, Some(BallTouch::Contested));
     }
 }

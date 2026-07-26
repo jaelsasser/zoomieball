@@ -58,13 +58,13 @@ const SEED: u64 = 0x005a_001e_ba11;
 const TICKS: u32 = 60;
 
 /// `controller_hash()` after [`TICKS`] ticks of the pinned fixture.
-const CONTROLLER_WITNESS: u64 = 0x00ff_c739_f54a_18cc;
+const CONTROLLER_WITNESS: u64 = 0xc088_cc40_b1fc_2dbb;
 /// `learning_hash()` after [`TICKS`] ticks of the pinned fixture.
-const LEARNING_WITNESS: u64 = 0x66b3_8050_17e6_d107;
+const LEARNING_WITNESS: u64 = 0x5674_2968_9444_8ee7;
 /// Length of the ZBCT envelope captured at that point.
-const CHECKPOINT_BYTES: usize = 766_746;
+const CHECKPOINT_BYTES: usize = 766_761;
 /// FNV-1a fold of that envelope, which pins the payload framing the length alone cannot.
-const CHECKPOINT_FOLD: u64 = 0xa912_2dba_dd68_5b7b;
+const CHECKPOINT_FOLD: u64 = 0xb734_b350_6dc3_4d46;
 
 /// The pinned fixture, driven to completion through the real driver so `act` and `learn` both run.
 fn played() -> Match<ZoomieBackend> {

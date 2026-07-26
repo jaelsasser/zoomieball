@@ -55,7 +55,7 @@ Each package owns a `TODO.md`; the [root roadmap](TODO.md) records cross-package
 
 The deterministic CPU implementation remains permanent. It is the conformance oracle, headless implementation, replay debugger, and 10v10 Canvas2D fallback. During WebGPU bring-up it also runs as a lockstep shadow: CPU commands feed GPU physics and the two paths compare per-step witnesses. The primary WebGPU path becomes GPU-resident only after physics, controller, and learning parity pass; authoritative state is then neither uploaded for rendering nor read back for presentation.
 
-The checked-in [default playbook](assets/default-playbook.ron) is the current cyclic graph-v0 tracer fixture. Trigger and per-ball verb/target forms are intentionally not encoded until those schema decisions are acknowledged.
+The checked-in [default playbook](assets/default-playbook.ron) is the current cyclic graph-v0 tracer fixture. Its trigger, verb, target, and form vocabulary is acknowledged in [graph-v0](docs/graph-v0-proposal.md) and reaches the fixture when the schema extension does.
 
 ## Determinism boundary
 
