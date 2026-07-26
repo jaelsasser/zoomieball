@@ -117,6 +117,8 @@ gated them would collapse the oracle/residual split that `DESIGN.md` keeps.
 | `Screen` | the midpoint between the target and the own goal mouth | stand between |
 | `Post` | the own goal-mouth plane, `y` tracking the target's `y` clamped to the mouth half-width | the goalie verb |
 
+> [!REVIEW] The verbs as is LGTM but I think this probably needs to read as something closer to football terminology applied to soccer teams -- it's full contact and the ball's physicality against other balls is part of what the 100v100 is meant to exploit. Compared to Rocket League our field isn't nearly as sparse
+
 `Mark` needs one new `prov` constant, `MARK_GAP`.
 
 Proposed resolution: for a body with local ID `L` on the resolving team, the squad is
