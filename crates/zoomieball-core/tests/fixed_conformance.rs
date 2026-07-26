@@ -133,7 +133,32 @@ fn vector_normalization_is_exact_in_the_supported_domain() {
         value.normalized(),
         Vec3Fx::new(Fx::from_raw(-39_321), Fx::from_raw(52_428), Fx::ZERO)
     );
+    // Load-bearing: `qnorm` is normatively total, so zero in / zero out is the defined answer
+    // rather than an implementation accident, and no epsilon precondition may be introduced.
     assert_eq!(Vec3Fx::ZERO.normalized(), Vec3Fx::ZERO);
+}
+
+/// An arithmetic right shift floors and therefore differs by one raw unit from the normative
+/// truncation for every negative accumulator that is not a multiple of 65536. Only such an
+/// accumulator separates the two rules, and every other vector here passes under both.
+#[test]
+fn renormalization_truncates_toward_zero_where_an_arithmetic_shift_would_floor() {
+    let least = Vec3Fx::new(Fx::from_raw(1), Fx::ZERO, Fx::ZERO);
+    let half = Vec3Fx::new(Fx::from_raw(32_768), Fx::ZERO, Fx::ZERO);
+    let past_one = Vec3Fx::new(Fx::from_raw(98_305), Fx::ZERO, Fx::ZERO);
+
+    // Accumulated products of -32768 and -98305; a shift would answer -1 and -2.
+    assert_eq!(least.dot(-half).raw(), 0);
+    assert_eq!(least.dot(-past_one).raw(), -1);
+    assert_eq!(least.dot(half).raw(), 0);
+    assert_eq!(least.dot(past_one).raw(), 1);
+
+    // The same accumulators reached through the cross product's cancelling z component.
+    let lateral = |raw| Vec3Fx::new(Fx::ZERO, Fx::from_raw(raw), Fx::ZERO);
+    assert_eq!(least.cross(lateral(-32_768)), Vec3Fx::ZERO);
+    assert_eq!(least.cross(lateral(-98_305)).z.raw(), -1);
+    assert_eq!(least.cross(lateral(32_768)), Vec3Fx::ZERO);
+    assert_eq!(least.cross(lateral(98_305)).z.raw(), 1);
 }
 
 #[test]

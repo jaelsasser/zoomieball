@@ -100,8 +100,12 @@ impl<B: ControllerBackend> Match<B> {
         self.playbook
             .resolve(self.play_node, &mut self.world, &mut self.intents);
         self.spatial.rebuild(self.world.view());
-        self.observations
-            .build(self.world.view(), &self.intents, &self.spatial);
+        self.observations.build(
+            self.world.view(),
+            &self.intents,
+            &self.physics.arena,
+            &self.spatial,
+        );
         let tick = self.world.tick;
         self.controller.act(
             ActRequest {
@@ -120,19 +124,16 @@ impl<B: ControllerBackend> Match<B> {
             &mut self.commands,
         );
 
-        let objective = self.world.objective_index();
-        let previous_objective_x = self.world.positions[objective].x;
         let events = physics_step(
             &mut self.world,
             &self.intents,
             &self.commands,
             &self.physics,
         );
-        let progress = self.world.positions[objective].x - previous_objective_x;
         accumulate_team_rewards(
             &mut self.rewards,
             &self.world.teams,
-            progress,
+            events.objective_progress,
             events.scorer,
         );
 

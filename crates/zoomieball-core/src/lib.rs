@@ -43,4 +43,4 @@ pub const REWARD_ABI_VERSION: u32 = 1;
 /// Version of the fixed controller and physics schedule.
 pub const SCHEDULE_ABI_VERSION: u32 = 1;
 /// Version of the replay hash fold.
-pub const REPLAY_ABI_VERSION: u32 = 1;
+pub const REPLAY_ABI_VERSION: u32 = 2;

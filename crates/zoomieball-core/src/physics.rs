@@ -9,6 +9,11 @@ use crate::world::{ActionCharges, ContactFrame, Role, Team, World};
 /// Baked Q16.16 duration of one nominal 120 Hz physics substep.
 pub const PHYSICS_DT: Fx = Fx::from_raw(546);
 
+/// Lateral basis for a contact whose normal is parallel to `forward`, which happens when the
+/// tangent projection vanishes and `forward` falls back to the ±X attack axis against an end
+/// wall. Y is normal to both attack axes, so it completes every reachable degenerate frame.
+const DEGENERATE_RIGHT: Vec3Fx = Vec3Fx::Y;
+
 /// White-cove interior and goal-mouth dimensions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Arena {
@@ -45,8 +50,10 @@ pub struct PhysicsConfig {
     pub gravity: Fx,
     /// Magnus coefficient.
     pub magnus: Fx,
-    /// Per-substep velocity retention.
+    /// Per-substep whole-velocity retention, i.e. air drag.
     pub drag: Fx,
+    /// Per-contact retention of the tangential velocity component, i.e. surface friction.
+    pub tangential_retention: Fx,
     /// Contact spin response.
     pub traction: Fx,
     /// Spin residual gain.
@@ -72,6 +79,8 @@ impl Default for PhysicsConfig {
             gravity: Fx::from_raw(642_253), // 9.8
             magnus: Fx::from_raw(328),      // 0.005
             drag: Fx::from_raw(65_208),     // 0.995
+            // Numerically equal to `drag` today, independently tunable by design.
+            tangential_retention: Fx::from_raw(65_208), // 0.995
             traction: Fx::from_raw(16_384),
             residual_gain: Fx::HALF,
             jump_impulse: Fx::from_raw(294_912),
@@ -89,6 +98,16 @@ impl Default for PhysicsConfig {
 pub struct PhysicsEvents {
     /// Team that scored, if any.
     pub scorer: Option<Team>,
+    /// Signed objective travel along X, summed per substep over continuous motion only.
+    pub objective_progress: Fx,
+}
+
+/// One goal resolved within a substep.
+#[derive(Debug, Clone, Copy)]
+struct Goal {
+    team: Team,
+    /// Signed X of the centre reposition, which is not motion and earns no progress.
+    reposition_x: Fx,
 }
 
 /// Refresh oracle steering from latched commands and advance two fixed substeps.
@@ -99,14 +118,19 @@ pub fn step(
     config: &PhysicsConfig,
 ) -> PhysicsEvents {
     assert_eq!(world.ids.len(), commands.commands.len());
+    let objective = world.objective_index();
     let mut events = PhysicsEvents::default();
     for _ in 0..PHYSICS_SUBSTEPS {
+        let entry_x = world.positions[objective].x;
         apply_actuators(world, intents, commands, config);
         integrate(world, config);
         for _ in 0..config.collision_iterations {
             collide_spheres(world, config.restitution);
         }
-        events.scorer = events.scorer.or_else(|| resolve_arena(world, config));
+        let goal = resolve_arena(world, config);
+        let reposition_x = goal.map_or(Fx::ZERO, |goal| goal.reposition_x);
+        events.objective_progress += world.positions[objective].x - entry_x - reposition_x;
+        events.scorer = events.scorer.or(goal.map(|goal| goal.team));
     }
     events
 }
@@ -132,7 +156,7 @@ fn apply_actuators(
         } else {
             tangent.normalized()
         };
-        let right = normal.cross(forward).normalized();
+        let right = direction_or(normal.cross(forward), DEGENERATE_RIGHT);
         let residual = forward * command.spin_residual.x
             + right * command.spin_residual.y
             + normal * command.spin_residual.z;
@@ -156,8 +180,12 @@ fn apply_actuators(
             world.contacts[body].touching = false;
         }
         if world.charges[body].air && command.air_cue {
-            let cue_direction =
-                (right * command.cue_hit[0] + normal * command.cue_hit[1] - forward).normalized();
+            // A hit offset that exactly cancels `-forward` still spends the charge, so fall
+            // back to the zero-offset cue rather than to a no-op impulse.
+            let cue_direction = direction_or(
+                right * command.cue_hit[0] + normal * command.cue_hit[1] - forward,
+                -forward,
+            );
             world.velocities[body] += cue_direction * config.air_impulse;
             world.charges[body].air = false;
         }
@@ -178,33 +206,48 @@ fn integrate(world: &mut World, config: &PhysicsConfig) {
     }
 }
 
-fn resolve_arena(world: &mut World, config: &PhysicsConfig) -> Option<Team> {
-    let mut scorer = None;
+fn resolve_arena(world: &mut World, config: &PhysicsConfig) -> Option<Goal> {
+    let mut goal = None;
     for body in 0..world.ids.len() {
         let position = world.positions[body];
         let radius = world.radii[body];
-        if world.roles[body] == Role::Objective
-            && position.y.abs() <= config.arena.goal_half_width
-            && position.z <= config.arena.goal_height
-        {
-            if position.x > config.arena.half_length + radius {
-                scorer = Some(Team::Zero);
-            } else if position.x < -config.arena.half_length - radius {
-                scorer = Some(Team::One);
-            }
-            if let Some(team) = scorer {
-                world.scores[team.index()] = world.scores[team.index()].saturating_add(1);
-                world.positions[body] = Vec3Fx::new(Fx::ZERO, Fx::ZERO, radius);
-                world.velocities[body] = Vec3Fx::ZERO;
-                world.spins[body] = Vec3Fx::ZERO;
-                world.contacts[body] = ContactFrame::default();
-                world.charges[body] = ActionCharges::default();
-                continue;
-            }
-        }
-        resolve_body_arena(world, body, config);
+        let scorer = in_goal_mouth(world, body, &config.arena)
+            .then(|| scoring_team(position.x, radius, &config.arena))
+            .flatten();
+        let Some(team) = scorer else {
+            resolve_body_arena(world, body, config);
+            continue;
+        };
+        world.scores[team.index()] = world.scores[team.index()].saturating_add(1);
+        world.positions[body] = Vec3Fx::new(Fx::ZERO, Fx::ZERO, radius);
+        world.velocities[body] = Vec3Fx::ZERO;
+        world.spins[body] = Vec3Fx::ZERO;
+        world.contacts[body] = ContactFrame::default();
+        world.charges[body] = ActionCharges::default();
+        goal = Some(Goal {
+            team,
+            reposition_x: -position.x,
+        });
     }
-    scorer
+    goal
+}
+
+/// Whether the objective sits in the goal cross-section, where the end walls do not apply.
+fn in_goal_mouth(world: &World, body: usize, arena: &Arena) -> bool {
+    let position = world.positions[body];
+    world.roles[body] == Role::Objective
+        && position.y.abs() <= arena.goal_half_width
+        && position.z <= arena.goal_height
+}
+
+fn scoring_team(x: Fx, radius: Fx, arena: &Arena) -> Option<Team> {
+    if x > arena.half_length + radius {
+        return Some(Team::Zero);
+    }
+    if x < -arena.half_length - radius {
+        return Some(Team::One);
+    }
+    None
 }
 
 fn resolve_body_arena(world: &mut World, body: usize, config: &PhysicsConfig) {
@@ -228,9 +271,7 @@ fn resolve_body_arena(world: &mut World, body: usize, config: &PhysicsConfig) {
         correction.y -= position.y - (config.arena.half_width - radius);
         normal -= Vec3Fx::Y;
     }
-    let in_goal = world.roles[body] == Role::Objective
-        && position.y.abs() <= config.arena.goal_half_width
-        && position.z <= config.arena.goal_height;
+    let in_goal = in_goal_mouth(world, body, &config.arena);
     if !in_goal && position.x < -config.arena.half_length + radius {
         correction.x += -config.arena.half_length + radius - position.x;
         normal += Vec3Fx::X;
@@ -250,7 +291,7 @@ fn resolve_body_arena(world: &mut World, body: usize, config: &PhysicsConfig) {
     }
     let normal_velocity = normal * world.velocities[body].dot(normal);
     world.velocities[body] =
-        normal_velocity + (world.velocities[body] - normal_velocity) * Fx::from_raw(65_208);
+        normal_velocity + (world.velocities[body] - normal_velocity) * config.tangential_retention;
     world.contacts[body] = ContactFrame {
         touching: true,
         normal,
@@ -284,6 +325,18 @@ fn collide_spheres(world: &mut World, restitution: Fx) {
             world.velocities[second] += normal * impulse;
         }
     }
+}
+
+/// Unit vector along `vector`, or `fallback` when it has no direction.
+///
+/// Normalization is total and answers zero for a zero input, which is arithmetically defined
+/// but not a physical direction: a zero basis vector silently deletes whatever rides on it.
+fn direction_or(vector: Vec3Fx, fallback: Vec3Fx) -> Vec3Fx {
+    let direction = vector.normalized();
+    if direction == Vec3Fx::ZERO {
+        return fallback;
+    }
+    direction
 }
 
 fn cap_speed(velocity: &mut Vec3Fx, cap: Fx) {
@@ -345,6 +398,41 @@ mod tests {
         assert_eq!(world.charges[0], ActionCharges::default());
     }
 
+    /// Against an end wall the forward fallback is the attack axis, i.e. the contact normal.
+    fn wall_pinned_world() -> World {
+        let mut world = World::new(10);
+        world.contacts[0] = ContactFrame {
+            touching: true,
+            normal: Vec3Fx::X,
+        };
+        world
+    }
+
+    #[test]
+    fn a_lateral_residual_survives_a_forward_parallel_to_the_contact_normal() {
+        let mut world = wall_pinned_world();
+        let intents = still_intents(&world);
+        let mut commands = MotorCommandBatch::with_len(world.ids.len());
+        commands.commands[0].spin_residual = Vec3Fx::Y;
+        apply_actuators(&mut world, &intents, &commands, &PhysicsConfig::default());
+        assert!(world.spins[0].y > Fx::ZERO);
+    }
+
+    #[test]
+    fn an_air_cue_that_cancels_its_own_offset_still_pushes() {
+        let mut world = wall_pinned_world();
+        let intents = still_intents(&world);
+        let mut commands = MotorCommandBatch::with_len(world.ids.len());
+        commands.commands[0] = MotorCommand {
+            air_cue: true,
+            cue_hit: [Fx::ZERO, Fx::ONE],
+            ..MotorCommand::default()
+        };
+        apply_actuators(&mut world, &intents, &commands, &PhysicsConfig::default());
+        assert!(!world.charges[0].air);
+        assert!(world.velocities[0].x < Fx::ZERO);
+    }
+
     #[test]
     fn combined_floor_and_wall_contact_produces_a_cove_normal() {
         let mut world = World::new(10);
@@ -390,6 +478,23 @@ mod tests {
         }
         assert_eq!(first, second);
         assert!(first.positions[0].x < first.positions[1].x);
+    }
+
+    #[test]
+    fn a_goal_reposition_keeps_its_approach_progress_and_discards_the_jump() {
+        let mut world = World::new(10);
+        let objective = world.objective_index();
+        let radius = world.radii[objective];
+        let entry_x = Fx::from_i32(16) + Fx::from_raw(Fx::ONE_RAW / 4);
+        world.positions[objective] = Vec3Fx::new(entry_x, Fx::ZERO, radius);
+        world.velocities[objective] = Vec3Fx::X * Fx::from_i32(20);
+        let intents = still_intents(&world);
+        let commands = MotorCommandBatch::with_len(world.ids.len());
+        let events = step(&mut world, &intents, &commands, &PhysicsConfig::default());
+        assert_eq!(events.scorer, Some(Team::Zero));
+        assert_eq!(world.positions[objective].x, Fx::ZERO);
+        assert!(events.objective_progress > Fx::ZERO);
+        assert!(events.objective_progress < entry_x);
     }
 
     #[test]

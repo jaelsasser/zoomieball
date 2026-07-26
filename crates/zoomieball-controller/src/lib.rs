@@ -69,7 +69,7 @@ impl ZoomieBackend {
             .map(|team| net_id(team, 100))
             .collect();
         let fielders = RolePool::new(
-            SparseCtrnnSpec::zoomieball_fielder(Seed(seed ^ 0xF1)),
+            SparseCtrnnSpec::reservoir_64_48_8(Seed(seed ^ 0xF1)),
             config,
             &fielder_ids,
             player_indices(active_per_team, 1..active_per_team),
@@ -77,7 +77,7 @@ impl ZoomieBackend {
             BODY_DT,
         );
         let goalies = RolePool::new(
-            SparseCtrnnSpec::zoomieball_goalie(Seed(seed ^ 0x61)),
+            SparseCtrnnSpec::reservoir_96_64_8(Seed(seed ^ 0x61)),
             config,
             &goalie_ids,
             vec![0, active_per_team],
@@ -198,7 +198,10 @@ impl ControllerBackend for ZoomieBackend {
             let average = if count == 0 { 0 } else { sum / count };
             let raw = clamp_i64(average).clamp(-ONE, ONE);
             self.team_rewards[team.index()] = [raw, if raw == 0 { 0 } else { raw.signum() * ONE }];
-            let _ = self.coaches.pop.set_gate(net_id(team, 100), Gate::new(raw));
+            assert!(
+                self.coaches.pop.set_gate(net_id(team, 100), Gate::new(raw)),
+                "a coach gate that does not land is silently absent learning"
+            );
         }
         let body_env = PulseEnv { dt: BODY_DT, tick };
         let coach_env = PulseEnv {
@@ -296,10 +299,11 @@ impl ControllerBackend for ZoomieBackend {
         ])
     }
 
+    // Folds learning state alone: a witness that absorbed `controller_hash` would
+    // move both layers on any inference divergence and localize nothing.
     fn learning_hash(&self) -> u64 {
         let hash = fold_u64(OFFSET_BASIS, self.learn_passes);
-        let hash = self.team_rewards.into_iter().flatten().fold(hash, fold_i32);
-        fold_u64(hash, self.controller_hash())
+        self.team_rewards.into_iter().flatten().fold(hash, fold_i32)
     }
 }
 
@@ -726,7 +730,10 @@ fn set_body_gates(pool: &mut RolePool, rewards: &RewardBatch) {
             .raw()
             .clamp(-ONE, ONE);
         let id = pool.pop.ids()[column];
-        let _ = pool.pop.set_gate(id, Gate::new(raw));
+        assert!(
+            pool.pop.set_gate(id, Gate::new(raw)),
+            "a body gate that does not land is silently absent learning"
+        );
     }
 }
 
@@ -910,6 +917,41 @@ mod tests {
         }
     }
 
+    /// A goal repositions the objective to the arena centre, so a tick-spanning progress
+    /// delta reads as a full-length run the wrong way and saturates the scoring team's
+    /// gates at `-ONE` — teaching goal avoidance.
+    #[test]
+    fn a_scored_goal_never_punishes_the_scoring_team() {
+        let controller = ZoomieBackend::new(10, 17);
+        let mut game = Match::new(
+            MatchConfig {
+                learning_interval: 1,
+                ..MatchConfig::default()
+            },
+            playbook(),
+            controller,
+        );
+        let objective = game.world().objective_index();
+        let radius = game.world().view().radii[objective];
+        game.world_mut().set_position(
+            objective,
+            Vec3Fx::new(
+                Fx::from_i32(16) + Fx::from_raw(Fx::ONE_RAW / 4),
+                Fx::ZERO,
+                radius,
+            ),
+        );
+        game.world_mut()
+            .set_velocity(objective, Vec3Fx::X * Fx::from_i32(20));
+        game.tick();
+
+        assert_eq!(game.world().scores(), [1, 0], "the fixture must score");
+        let [scorer, conceder] =
+            Team::ALL.map(|team| game.controller().team_rewards[team.index()][0]);
+        assert!(scorer >= 0, "scoring team gate {scorer} is negative");
+        assert!(conceder <= 0, "conceding team gate {conceder} is positive");
+    }
+
     #[test]
     fn checkpoint_round_trip_restores_all_population_witnesses() {
         let controller = ZoomieBackend::new(10, 11);
@@ -948,5 +990,33 @@ mod tests {
             Err(CheckpointError::AbiMismatch { .. })
         ));
         assert_eq!(controller.controller_hash(), original);
+    }
+
+    /// Layered witnesses localize a divergence only while each folds its own layer, so an
+    /// inference pulse with no learning pass must leave the learning witness untouched.
+    #[test]
+    fn an_inference_only_tick_moves_the_controller_witness_alone() {
+        let controller = ZoomieBackend::new(10, 19);
+        let mut game = Match::new(MatchConfig::default(), playbook(), controller);
+        game.tick();
+        let controller = game.controller().controller_hash();
+        let learning = game.controller().learning_hash();
+        game.tick();
+
+        assert_eq!(
+            game.controller().learn_passes,
+            0,
+            "the fixture must not reach a learning pass"
+        );
+        assert_ne!(
+            game.controller().controller_hash(),
+            controller,
+            "an inference pulse must move the controller witness"
+        );
+        assert_eq!(
+            game.controller().learning_hash(),
+            learning,
+            "no learning pass ran, so the learning witness must not move"
+        );
     }
 }

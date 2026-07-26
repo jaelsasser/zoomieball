@@ -1,6 +1,7 @@
 //! Uncapped target-directed hemisphere observations and deterministic spatial indexing.
 
 use crate::fixed::{Fx, Vec3Fx};
+use crate::physics::Arena;
 use crate::playbook::OracleIntentBatch;
 use crate::world::{Role, Team, WorldView};
 
@@ -103,20 +104,27 @@ impl ObservationBatch {
         &mut self,
         world: WorldView<'_>,
         intents: &OracleIntentBatch,
+        arena: &Arena,
         index: &SpatialIndex,
     ) {
-        self.build_internal(world, intents, Some(index));
+        self.build_internal(world, intents, arena, Some(index));
     }
 
     /// Brute-force semantic oracle used by equivalence tests.
-    pub fn build_brute_force(&mut self, world: WorldView<'_>, intents: &OracleIntentBatch) {
-        self.build_internal(world, intents, None);
+    pub fn build_brute_force(
+        &mut self,
+        world: WorldView<'_>,
+        intents: &OracleIntentBatch,
+        arena: &Arena,
+    ) {
+        self.build_internal(world, intents, arena, None);
     }
 
     fn build_internal(
         &mut self,
         world: WorldView<'_>,
         intents: &OracleIntentBatch,
+        arena: &Arena,
         index: Option<&SpatialIndex>,
     ) {
         assert_eq!(world.len(), intents.intents.len());
@@ -133,13 +141,11 @@ impl ObservationBatch {
                 self.relative[target] = world.positions[target] - world.positions[observer];
                 self.lengths[target] = raw_length_squared(self.relative[target]);
             }
-            self.near_order.clear();
-            self.near_order.extend(0..world.len());
-            self.near_order.sort_unstable_by(|first, second| {
-                self.lengths[*first]
-                    .cmp(&self.lengths[*second])
-                    .then_with(|| first.cmp(second))
-            });
+            // Keyed on this observer's distances, so it cannot hoist out of the loop; only
+            // `occluded_brute_force` walks it, so the indexed path skips the sort entirely.
+            if index.is_none() {
+                self.sort_near_order(world.len());
+            }
             for target in 0..world.len() {
                 if target == observer {
                     continue;
@@ -169,9 +175,19 @@ impl ObservationBatch {
                     target: Some(target),
                 });
             }
-            append_environment_rays(&mut self.rays, forward, team);
+            append_environment_rays(&mut self.rays, arena, forward, team);
             self.offsets.push(self.rays.len());
         }
+    }
+
+    fn sort_near_order(&mut self, body_count: usize) {
+        self.near_order.clear();
+        self.near_order.extend(0..body_count);
+        self.near_order.sort_unstable_by(|first, second| {
+            self.lengths[*first]
+                .cmp(&self.lengths[*second])
+                .then_with(|| first.cmp(second))
+        });
     }
 }
 
@@ -255,16 +271,25 @@ fn tag_for(world: WorldView<'_>, observer: usize, target: usize) -> SemanticTag 
     }
 }
 
-fn append_environment_rays(rays: &mut Vec<RayObservation>, forward: Vec3Fx, team: Team) {
+/// One length unit; the floor is the arena origin, so `Arena` carries no extent to derive
+/// a downward depth from.
+const FLOOR_RAY_DEPTH: Fx = Fx::ONE;
+
+fn append_environment_rays(
+    rays: &mut Vec<RayObservation>,
+    arena: &Arena,
+    forward: Vec3Fx,
+    team: Team,
+) {
     let environment = [
-        (Vec3Fx::X, Fx::from_i32(16), SemanticTag::ARENA),
-        (-Vec3Fx::X, Fx::from_i32(16), SemanticTag::ARENA),
-        (Vec3Fx::Y, Fx::from_i32(9), SemanticTag::ARENA),
-        (-Vec3Fx::Y, Fx::from_i32(9), SemanticTag::ARENA),
-        (Vec3Fx::Z, Fx::from_i32(6), SemanticTag::ARENA),
-        (-Vec3Fx::Z, Fx::from_i32(1), SemanticTag::ARENA),
-        (team.attack_axis(), Fx::from_i32(16), SemanticTag::GOAL),
-        (-team.attack_axis(), Fx::from_i32(16), SemanticTag::GOAL),
+        (Vec3Fx::X, arena.half_length, SemanticTag::ARENA),
+        (-Vec3Fx::X, arena.half_length, SemanticTag::ARENA),
+        (Vec3Fx::Y, arena.half_width, SemanticTag::ARENA),
+        (-Vec3Fx::Y, arena.half_width, SemanticTag::ARENA),
+        (Vec3Fx::Z, arena.height, SemanticTag::ARENA),
+        (-Vec3Fx::Z, FLOOR_RAY_DEPTH, SemanticTag::ARENA),
+        (team.attack_axis(), arena.half_length, SemanticTag::GOAL),
+        (-team.attack_axis(), arena.half_length, SemanticTag::GOAL),
     ];
     rays.extend(
         environment
@@ -503,7 +528,7 @@ mod tests {
         let mut index = SpatialIndex::new(world.view().len());
         index.rebuild(world.view());
         let mut observations = ObservationBatch::with_capacity(world.view().len());
-        observations.build(world.view(), &intents, &index);
+        observations.build(world.view(), &intents, &Arena::default(), &index);
         assert!(
             observations
                 .for_body(observer)
@@ -527,7 +552,7 @@ mod tests {
         let mut index = SpatialIndex::new(world.view().len());
         index.rebuild(world.view());
         let mut observations = ObservationBatch::with_capacity(world.view().len());
-        observations.build(world.view(), &intents, &index);
+        observations.build(world.view(), &intents, &Arena::default(), &index);
         let rays = observations.for_body(observer);
         assert!(rays.iter().any(|ray| ray.target == Some(blocker)));
         assert!(!rays.iter().any(|ray| ray.target == Some(hidden)));
@@ -542,8 +567,8 @@ mod tests {
         index.rebuild(world.view());
         let mut grid = ObservationBatch::with_capacity(world.view().len());
         let mut brute = ObservationBatch::with_capacity(world.view().len());
-        grid.build(world.view(), &intents, &index);
-        brute.build_brute_force(world.view(), &intents);
+        grid.build(world.view(), &intents, &Arena::default(), &index);
+        brute.build_brute_force(world.view(), &intents, &Arena::default());
         assert_eq!(grid, brute);
     }
 
@@ -568,8 +593,8 @@ mod tests {
             }
             let intents = forward_intents(&world);
             index.rebuild(world.view());
-            grid.build(world.view(), &intents, &index);
-            brute.build_brute_force(world.view(), &intents);
+            grid.build(world.view(), &intents, &Arena::default(), &index);
+            brute.build_brute_force(world.view(), &intents, &Arena::default());
             assert_eq!(grid, brute, "fixture {seed}");
         }
     }

@@ -91,7 +91,7 @@ No trigger or verb syntax is implied by the current fixture. Those forms require
 | `learning` | `u64`, `ControllerBackend::learning_hash()` | Eligibility, rewards, gates, and parameter-update parity |
 | `pipeline` | `u64`, diagnostic fold | ABI words, play node, `World::diagnostic_hash()`, and the three component witnesses for replay localization |
 
-The physics hash is schedule-independent because per-body hashes combine with wrapping addition. Controller and learning checksums retain sibling Zoomie's established arithmetic and wire semantics. The pipeline fold is diagnostic; equality of that fold alone does not replace component comparison.
+The physics hash is schedule-independent because per-body hashes combine with wrapping addition. Controller and learning checksums retain sibling Zoomie's established arithmetic and wire semantics. Each component witness folds its own layer and no other, so a divergence localizes to the single word that moved; `REPLAY_ABI_VERSION = 2` identifies the fold in which `learning` stopped absorbing `controller`. The pipeline fold is diagnostic; equality of that fold alone does not replace component comparison.
 
 Mirrored-state conformance does not compare raw hash values. A future transformed comparison must first specify mappings for polar vectors, axial vectors, team labels, commands, IDs, and event records.
 
@@ -122,5 +122,5 @@ The checkpoint envelope is local test data rather than a stable import contract.
 | Physics (`PHYSICS_ABI_VERSION`) | 1 | Zoomieball-local v0 |
 | Reward (`REWARD_ABI_VERSION`) | 1 | Zoomieball-local v0 |
 | Fixed schedule (`SCHEDULE_ABI_VERSION`) | 1 | Required identity: 60 Hz body, 15 Hz coach, 120 Hz oracle/motor/physics |
-| Replay fold (`REPLAY_ABI_VERSION`) | 1 | Zoomieball-local v0 |
+| Replay fold (`REPLAY_ABI_VERSION`) | 2 | Zoomieball-local v0 |
 | Sibling Zoomie arithmetic and persistence | Established by Zoomie | Preserve its wire formats |

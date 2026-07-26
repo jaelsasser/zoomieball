@@ -84,7 +84,8 @@ observable reads, writes, and witness values are identical to this order.
 - Length unit: one ball radius (r = 1). Time unit: seconds. Angular velocity: rad/s.
   Mass m = 1; sphere inertia I = 2/5.
 - All authoritative physical state and every value feeding it use Q16.16 `i32`
-  (65536 = 1.0). Range is ±32767.9999 and resolution is 2⁻¹⁶.
+  (65536 = 1.0). The range is two's-complement asymmetric: [−32768.0, +32767.99998],
+  with resolution 2⁻¹⁶. The negative endpoint is representable and in-domain.
 - No `f32` or `f64` value may feed simulation, controller input, rewards, graph
   decisions, or a conformance witness.
 - Baked constants have one Zoomieball source and are emitted for WGSL. A shadow WGSL
@@ -102,11 +103,25 @@ algorithm, is normative.
 | `qdiv(a, b)` | Sign-adjusted `trunc((|a| << 16) / |b|)`, exact through 64÷32 long division or an equivalent exact method. Callers guarantee `b != 0`. |
 | `isqrt64(x: u64) -> u32` | `floor(sqrt(x))`, exact. |
 | `qlen(v)` | `isqrt64(Σ mul64(vᵢ,vᵢ))`, producing a Q16.16 vec3 magnitude. |
-| `qnorm(v)` | `qdiv(vᵢ, qlen(v))` per component. The caller guarantees `qlen(v) > EPS_LEN`. |
+| `qnorm(v)` | Total on every input: `qdiv(vᵢ, qlen(v))` per component when `qlen(v) != 0`, and the zero vector when `qlen(v) == 0`. Zero in, zero out is normative; there is no epsilon precondition. |
 
-Cross and dot products accumulate exact component products in widened storage before
-the 16-bit renormalizing shift. Caps bound all state so those accumulators cannot
-overflow.
+Cross and dot products accumulate exact component products in widened storage, then
+divide the accumulated sum by 65536 with truncation toward zero, matching `qmul`. This
+renormalization is not a shift: an arithmetic right shift rounds toward −∞ and differs
+by one raw unit for every negative sum that is not a multiple of 65536. Caps bound all
+state so those accumulators cannot overflow.
+
+`qmul`, `qdiv`, `from_i32`, `sqrt`, and the cross/dot renormalization are defined only
+where the exact result fits `i32`; `qdiv` additionally requires `b != 0`. `Add`, `Sub`,
+and `Neg` are total and wrap two's-complement per determinism rule 3. Conforming
+callers never drive the defined-domain helpers outside `i32`, and the state caps of
+substep stage 8 are what bound their inputs.
+
+A tier may trap on an out-of-range helper result. The CPU tier does: those five helpers
+panic, as a defect detector for nonconforming input. WGSL has no trapping arithmetic,
+so the GPU tier cannot trap and produces an unspecified value instead. The tiers agree
+because the out-of-range case is unreachable for conforming input, not because the GPU
+tier checks anything.
 
 ## Canonical physics words and match metadata
 
@@ -162,7 +177,7 @@ render layer. They are neither canonical words nor match metadata.
 | `N_ITER` | 4 | prov | fixed Jacobi iteration count |
 | `V_MAX` | 40 r/s | prov | speed cap; `V_MAX·DT = 0.33 r < r` |
 | `W_MAX` | 40 rad/s | prov | spin cap |
-| `EPS_LEN` | 2⁻⁸ | prov | normalization guard |
+| `EPS_LEN` | 2⁻⁸ | prov | physics-level direction guard; not a `qnorm` precondition |
 
 A cue preset is `(hit-offset angle θ from center toward the hit normal, azimuth
 frame, J)`. It applies Δv = J·d and
@@ -275,6 +290,14 @@ reward model. Step 8 of the body tick accumulates them into typed body/team rewa
 batches. A scheduled learning pass observes the complete accumulator, mutates all due
 Zoomie populations in their fixed schedule, updates the learning witness, and clears
 only the rewards consumed by that pass.
+
+Progress rewards measure continuous game-ball motion only. A substep's progress delta
+is the game-ball displacement produced by that substep's integrate, arena-contact,
+pairs, and caps stages. A discontinuous reposition is not motion: it contributes zero
+progress, and the position it establishes is the baseline for the next substep's delta.
+The post-goal return of the game ball to the arena centre is such a reposition. A goal
+is paid by its event reward alone; the displacement the reposition causes is neither
+rewarded nor penalized, on either team's sign.
 
 Learning cannot run between the two physics substeps. Inspection, checkpointing, and
 replay publication observe state after any due learning pass so a checkpoint resumes
